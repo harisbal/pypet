@@ -20,7 +20,13 @@ from pypet._version import __version__ as VERSION
 from pypet.parameter import ObjectTable, Parameter
 import pypet.naturalnaming as nn
 from pypet.pypetlogging import HasLogger, DisableAllLogging
+from pypet.storageservice import NodeProcessingTimer
 
+
+MAX_DB_NAME_LENGTH = 50
+TREE_COLL = 'tree'
+TRAJ_COLL = 'traj'
+DATA_COLL = 'data'
 
 
 class MongoStorageService(StorageService, HasLogger):
@@ -36,6 +42,13 @@ class MongoStorageService(StorageService, HasLogger):
             self._mongo_port = None
         self._arctic = arctic.Arctic(self._client)
         self._traj_coll = None
+        self._tree_coll = None
+        self._arctic_lib = None
+        self._mode = None
+        self._traj_name = None
+        self._db_name = None
+        self._db = None
+        self._is_open = False
 
 
     @property
@@ -46,7 +59,7 @@ class MongoStorageService(StorageService, HasLogger):
         this via this property.
 
         """
-        return True
+        return self._is_open
 
     @property
     def multiproc_safe(self):
@@ -356,7 +369,7 @@ class MongoStorageService(StorageService, HasLogger):
         """
         try:
 
-            self._srvc_opening_routine(msg, kwargs)
+            self._srvc_opening_routine('a', msg, kwargs)
 
             if msg == pypetconstants.MERGE:
                 self._trj_merge_trajectories(*args, **kwargs)
@@ -393,17 +406,6 @@ class MongoStorageService(StorageService, HasLogger):
 
             elif msg == pypetconstants.ACCESS_DATA:
                 return self._hdf5_interact_with_data(stuff_to_store, *args, **kwargs)
-
-            elif msg == pypetconstants.OPEN_FILE:
-                pass
-
-            elif msg == pypetconstants.CLOSE_FILE:
-                self._client.close()
-                self._client = None
-                self._arctic = None
-
-            elif msg == pypetconstants.FLUSH:
-                pass
 
             else:
                 raise pex.NoSuchServiceError('I do not know how to handle `%s`' % msg)
@@ -544,7 +546,7 @@ class MongoStorageService(StorageService, HasLogger):
 
         """
         try:
-            self._srvc_opening_routine(msg, kwargs)
+            self._srvc_opening_routine('r', msg, kwargs)
 
             if msg == pypetconstants.TRAJECTORY:
                 self._trj_load_trajectory(stuff_to_load, *args, **kwargs)
@@ -571,7 +573,6 @@ class MongoStorageService(StorageService, HasLogger):
             self._logger.error('Failed loading  `%s`' % str(stuff_to_load))
             raise
 
-
     def _trj_store_trajectory(self, traj, only_init=False,
                           store_data=pypetconstants.STORE_DATA,
                           max_depth=None):
@@ -593,18 +594,6 @@ class MongoStorageService(StorageService, HasLogger):
             raise RuntimeError('You want to store a completely new trajectory with name'
                                ' `%s` but this trajectory is already found in file `%s`' %
                                (traj.v_name, self._filename))
-
-        # Extract HDF5 settings from the trajectory
-        self._srvc_check_hdf_properties(traj)
-
-        # Store the trajectory for the first time if necessary:
-        if self._trajectory_group is None:
-            self._trajectory_group = ptcompat.create_group(self._hdf5file,
-                                                           where='/',
-                                                           name=self._trajectory_name,
-                                                           title=self._trajectory_name,
-                                                           filters=self._all_get_filters())
-        traj._stored = True
 
         # Store meta information
         self._trj_store_meta_data(traj)
@@ -637,16 +626,15 @@ class MongoStorageService(StorageService, HasLogger):
                 # Store recursively the elements
                 self._tree_store_sub_branch(traj, child_name, store_data=store_data,
                                             with_links=True,
-                                            recursive=True, max_depth=max_depth,
-                                            hdf5_group=self._trajectory_group)
+                                            recursive=True, max_depth=max_depth)
 
             self._logger.info('Finished storing Trajectory `%s`.' % self._trajectory_name)
         else:
             self._logger.info('Finished init or meta data update for `%s`.' %
-                              self._trajectory_name)
+                              self._traj_name)
         traj._stored = True
 
-     def _srvc_opening_routine(self, mode, msg=None, kwargs=()):
+    def _srvc_opening_routine(self, mode, msg=None, kwargs=()):
         """Opens an hdf5 file for reading or writing
 
         The file is only opened if it has not been opened before (i.e. `self._hdf5file is None`).
@@ -681,82 +669,238 @@ class MongoStorageService(StorageService, HasLogger):
         self._srvc_extract_file_information(kwargs)
 
         if not self.is_open:
-
             if 'a' in mode:
-                (path, filename) = os.path.split(self._filename)
 
-                self._hdf5store = HDFStore(self._filename, mode=self._mode, complib=self._complib,
-                                           complevel=self._complevel, fletcher32=self._fletcher32)
-                self._hdf5file = self._hdf5store._handle
-                self._hdf5file.title = self._file_title
-
-                if self._trajectory_name is not None:
-                    if not '/' + self._trajectory_name in self._hdf5file:
+                if self._db_name is not None:
+                    if self._db_name in self._client.database_names():
                         # If we want to store individual items we we have to check if the
                         # trajectory has been stored before
                         if not msg == pypetconstants.TRAJECTORY:
-                            raise ValueError('Your trajectory cannot be found in the hdf5file, '
+                            raise ValueError('Your trajectory cannot be found in the database, '
                                              'please use >>traj.f_store()<< '
                                              'before storing anything else.')
-
-                    else:
-                        # Keep a reference to the top trajectory node
-                        self._trajectory_group = ptcompat.get_node(self._hdf5file,
-                                                                   '/' + self._trajectory_name)
+                        else:
+                            self._arctic.initialize_library(self._db_name + '.' + DATA_COLL)
+                    # Keep a reference to the top trajectory node
+                    self._db = self._client[self._db_name]
+                    self._arctic_lib = self._arctic[self._db_name + '.' + DATA_COLL]
+                    self._tree_coll = self._db[TREE_COLL]
+                    self._traj_coll = self._db[TRAJ_COLL]
                 else:
                     raise ValueError('I don`t know which trajectory to load')
-                self._logger.debug('Opening HDF5 file `%s` in mode `a` with trajectory `%s`' %
-                                   (self._filename, self._trajectory_name))
+                self._logger.debug('Opening MongoDB `%s` in mode `a` with trajectory `%s`' %
+                                   (self._db_name, self._traj_name))
 
             elif mode == 'r':
 
-                if self._trajectory_name is not None and self._trajectory_index is not None:
-                    raise ValueError('Please specify either a name of a trajectory or an index, '
-                                     'but not both at the same time.')
-
-                if not os.path.isfile(self._filename):
-                    raise ValueError('File `' + self._filename + '` does not exist.')
-
-                self._hdf5store = HDFStore(self._filename, mode=self._mode, complib=self._complib,
-                                           complevel=self._complevel, fletcher32=self._fletcher32)
-                self._hdf5file = self._hdf5store._handle
-
-                if self._trajectory_index is not None:
-                    # If an index is provided pick the trajectory at the corresponding
-                    # position in the trajectory node list
-                    nodelist = ptcompat.list_nodes(self._hdf5file, where='/')
-
-                    if (self._trajectory_index >= len(nodelist) or
-                            self._trajectory_index < -len(nodelist)):
-                        raise ValueError('Trajectory No. %d does not exists, there are only '
-                                         '%d trajectories in %s.'
-                                         % (self._trajectory_index, len(nodelist), self._filename))
-
-                    self._trajectory_group = nodelist[self._trajectory_index]
-                    self._trajectory_name = self._trajectory_group._v_name
-
-                elif self._trajectory_name is not None:
+                if self._trajectory_name is not None:
                     # Otherwise pick the trajectory group by name
                     if not '/' + self._trajectory_name in self._hdf5file:
                         raise ValueError('File %s does not contain trajectory %s.'
                                          % (self._filename, self._trajectory_name))
 
-                    self._trajectory_group = ptcompat.get_node(self._hdf5file,
-                                                               '/' + self._trajectory_name)
+                    self._db = self._client[self._db_name]
+                    self._arctic_lib = self._arctic[LIB_PREFIX + self._db_name + '.' + DATA_COLL]
+                    self._tree_coll = self._db[TREE_COLL]
+                    self._traj_coll = self._db[TRAJ_COLL]
                 else:
-                    raise ValueError('Please specify a name of a trajectory to load or its '
-                                     'index, otherwise I cannot open one.')
+                    raise ValueError('Please specify a name of a trajectory to load, '
+                                     'otherwise I cannot open the databse.')
 
-                self._logger.debug('Opening HDF5 file `%s` in mode `r` with trajectory `%s`' %
-                                   (self._filename, self._trajectory_name))
+                self._logger.debug('Opening MongoDB `%s` in mode `r` with trajectory `%s`' %
+                                   (self._db_name, self._traj_name))
 
             else:
                 raise RuntimeError('You shall not pass!')
 
             self._node_processing_timer = NodeProcessingTimer(display_time=self._display_time,
                                                               logger_name=self._logger.name)
-            self._overview_group_ = None
+            self._is_open = True
 
-            return True
+    def _srvc_extract_file_information(self, kwargs):
+        """Extracts file information from kwargs.
+
+        Note that `kwargs` is not passed as `**kwargs` in order to also
+        `pop` the elements on the level of the function calling `_srvc_extract_file_information`.
+
+        """
+
+        if 'trajectory_name' in kwargs:
+            traj_name = kwargs.pop('trajectory_name')
+            if self._traj_name is not None and (traj_name != self._traj_name):
+                self._srvc_closing_routine()
+            self._traj_name = traj_name
+            self._db_name = self._traj_name.lower()[:MAX_DB_NAME_LENGTH]
+
+    def _srvc_closing_routine(self):
+        """Routine to close an hdf5 file
+
+        The file is closed only when `closing=True`. `closing=True` means that
+        the file was opened in the current highest recursion level. This prevents re-opening
+        and closing of the file if `store` or `load` are called recursively.
+
+        """
+        self._client.close()
+        self._traj_coll = None
+        self._tree_coll = None
+        self._arctic_lib = None
+        self._mode = None
+        self._traj_name = None
+        self._db_name = None
+        self._db = None
+        self._is_open = False
+
+    def _trj_store_meta_data(self, traj):
+        """ Stores general information about the trajectory in the hdf5file.
+
+        The `info` table will contain the name of the trajectory, it's timestamp, a comment,
+        the length (aka the number of single runs), and the current version number of pypet.
+
+        Also prepares the desired overview tables and fills the `run` table with dummies.
+
+        """
+
+        # Description of the `info` table
+
+        descriptiondict = {'_id' : 'info',
+                           'name': traj.v_name,
+                           'time': traj.v_time,
+                           'timestamp': traj.v_timestamp,
+                           'comment': traj.v_comment,
+                           # 'length': len(traj),
+                           'version': traj.v_version,
+                           'python': traj.v_python}
+        # 'loaded_from' : pt.StringCol(pypetconstants.HDF5_STRCOL_MAX_LOCATION_LENGTH)}
+
+        self._trag_coll.
+
+        # Description of the `run` table
+        rundescription_dict = {'name': pt.StringCol(pypetconstants.HDF5_STRCOL_MAX_NAME_LENGTH,
+                                                    pos=1),
+                               'time': pt.StringCol(len(traj.v_time), pos=2),
+                               'timestamp': pt.FloatCol(pos=3),
+                               'idx': pt.IntCol(pos=0),
+                               'completed': pt.IntCol(pos=8),
+                               'parameter_summary': pt.StringCol(
+                                   pypetconstants.HDF5_STRCOL_MAX_COMMENT_LENGTH,
+                                   pos=6),
+                               'short_environment_hexsha': pt.StringCol(7, pos=7),
+                               'finish_timestamp': pt.FloatCol(pos=4),
+                               'runtime': pt.StringCol(
+                                   pypetconstants.HDF5_STRCOL_MAX_RUNTIME_LENGTH,
+                                   pos=5)}
+
+        runtable = self._all_get_or_create_table(where=self._overview_group,
+                                                 tablename='runs',
+                                                 description=rundescription_dict)
+
+        hdf5_description_dict = {'complib': pt.StringCol(7, pos=0),
+                                 'complevel': pt.IntCol(pos=1),
+                                 'shuffle': pt.BoolCol(pos=2),
+                                 'fletcher32': pt.BoolCol(pos=3),
+                                 'pandas_format': pt.StringCol(7, pos=4),
+                                 'encoding': pt.StringCol(11, pos=5)}
+
+        pos = 7
+        for name, table_name in HDF5StorageService.NAME_TABLE_MAPPING.items():
+            hdf5_description_dict[table_name] = pt.BoolCol(pos=pos)
+            pos += 1
+
+        # Store the hdf5 properties in an overview table
+        hdf5_description_dict.update({'purge_duplicate_comments': pt.BoolCol(pos=pos + 2),
+                                      'results_per_run': pt.IntCol(pos=pos + 3),
+                                      'derived_parameters_per_run': pt.IntCol(pos=pos + 4)})
+
+        hdf5table = self._all_get_or_create_table(where=self._overview_group,
+                                                  tablename='hdf5_settings',
+                                                  description=hdf5_description_dict)
+
+        insert_dict = {}
+        for attr_name in self.ATTR_LIST:
+            insert_dict[attr_name] = getattr(self, attr_name)
+
+        for attr_name, table_name in self.NAME_TABLE_MAPPING.items():
+            insert_dict[table_name] = getattr(self, attr_name)
+
+        for attr_name, name in self.PR_ATTR_NAME_MAPPING.items():
+            insert_dict[name] = getattr(self, attr_name)
+
+        self._all_add_or_modify_row(traj.v_name, insert_dict, hdf5table, index=0,
+                                    flags=(HDF5StorageService.ADD_ROW,
+                                           HDF5StorageService.MODIFY_ROW))
+
+
+        # Fill table with dummy entries starting from the current table size
+        actual_rows = runtable.nrows
+        self._trj_fill_run_table(traj, actual_rows, len(traj._run_information))
+        # stop != len(traj) to allow immediate post-proc with QUEUE wrapping
+
+        # Store the annotations and comment of the trajectory node
+        self._grp_store_group(traj, store_data=pypetconstants.STORE_DATA,
+                                  with_links=False,
+                                  recursive=False,
+                                  _hdf5_group=self._trajectory_group)
+
+        # Store the list of explored paramters
+        self._trj_store_explorations(traj)
+
+        # Prepare the exploration tables
+        # Prepare the overview tables
+        tostore_tables = []
+
+        for name, table_name in HDF5StorageService.NAME_TABLE_MAPPING.items():
+
+            # Check if we want the corresponding overview table
+            # If the trajectory does not contain information about the table
+            # we assume it should be created.
+
+            if getattr(self, name):
+                tostore_tables.append(table_name)
+
+        self._srvc_make_overview_tables(tostore_tables, traj)
+
+    def _trj_load_exploration(self, traj):
+        """Recalls names of all explored parameters"""
+        if hasattr(self._overview_group, 'explorations'):
+            explorations_table = ptcompat.get_child(self._overview_group, 'explorations')
+            for row in explorations_table.iterrows():
+                param_name = compat.tostr(row['explorations'])
+                if param_name not in traj._explored_parameters:
+                    traj._explored_parameters[param_name] = None
         else:
-            return False
+            # This is for backwards compatibility
+            for what in ('parameters', 'derived_parameters'):
+                if hasattr(self._trajectory_group, what):
+                    parameters = ptcompat.get_child(self._trajectory_group, what)
+                    for group in ptcompat.walk_groups(parameters):
+                        if self._all_get_from_attrs(group, HDF5StorageService.LENGTH):
+                            group_location = group._v_pathname
+                            full_name = '.'.join(group_location.split('/')[2:])
+                            traj._explored_parameters[full_name] = None
+
+    def _trj_store_explorations(self, traj):
+        """Stores a all explored parameter names for internal recall"""
+        nexplored = len(traj._explored_parameters)
+        if nexplored > 0:
+            if hasattr(self._overview_group, 'explorations'):
+                explorations_table = ptcompat.get_child(self._overview_group, 'explorations')
+                if len(explorations_table) != nexplored:
+                    ptcompat.remove_node(self._hdf5file, where=self._overview_group,
+                                         name='explorations')
+        if not hasattr(self._overview_group, 'explorations'):
+            explored_list = compat.listkeys(traj._explored_parameters)
+            if explored_list:
+                string_col = self._all_get_table_col('explorations',
+                                                      explored_list,
+                                                      'overview.explorations')
+            else:
+                string_col = pt.StringCol(1)
+            description = {'explorations': string_col}
+            explorations_table = ptcompat.create_table(self._hdf5file,
+                                                       where=self._overview_group,
+                                                       name='explorations',
+                                                       description=description)
+            rows = [(compat.tobytes(x),) for x in explored_list]
+            if rows:
+                explorations_table.append(rows)
+                explorations_table.flush()
