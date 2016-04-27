@@ -767,7 +767,7 @@ class MongoStorageService(StorageService, HasLogger):
                            'time': traj.v_time,
                            'timestamp': traj.v_timestamp,
                            'comment': traj.v_comment,
-                           # 'length': len(traj),
+                           'length': len(traj),
                            'version': traj.v_version,
                            'python': traj.v_python}
         # 'loaded_from' : pt.StringCol(pypetconstants.HDF5_STRCOL_MAX_LOCATION_LENGTH)}
