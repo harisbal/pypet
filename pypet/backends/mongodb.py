@@ -23,9 +23,10 @@ from pypet.pypetlogging import HasLogger, DisableAllLogging
 from pypet.storageservice import NodeProcessingTimer
 
 
-MAX_DB_NAME_LENGTH = 50
+MAX_NAME_LENGTH = 50
 TREE_COLL = 'tree'
-TRAJ_COLL = 'traj'
+INFO_COLL = 'info'
+RUN_COLL = 'runs'
 DATA_COLL = 'data'
 
 
@@ -41,15 +42,32 @@ class MongoStorageService(StorageService, HasLogger):
             self._mongo_host = None
             self._mongo_port = None
         self._arctic = arctic.Arctic(self._client)
-        self._traj_coll = None
+        self._info_coll = None
         self._tree_coll = None
+        self._run_coll = None
         self._arctic_lib = None
         self._mode = None
         self._traj_name = None
+        self._traj_stump = None
         self._db_name = None
         self._db = None
         self._is_open = False
 
+    CLASS_NAME = 'class_name'
+    ''' Name of a parameter or result class, is converted to a constructor'''
+    COMMENT = 'comment'
+    ''' Comment of parameter or result'''
+    LENGTH = 'length'
+    ''' Length of a parameter if it is explored, no longer in use, only for backwards
+    compatibility'''
+    LEAF = 'leaf'
+    ''' Whether an hdf5 node is a leaf node'''
+    ANNOTATIONS = 'annotations'
+    '''Annotations entry'''
+    GROUPS_AND_LEAVES = 'groups_leaves'
+    '''Children entry'''
+    LINKS = 'links'
+    '''Links entry'''
 
     @property
     def is_open(self):
@@ -590,13 +608,16 @@ class MongoStorageService(StorageService, HasLogger):
 
         # In case we accidentally chose a trajectory name that already exist
         # We do not want to mess up the stored trajectory but raise an Error
-        if not traj._stored and self._traj_coll is not None:
+        if not traj._stored and self._info_coll is not None:
             raise RuntimeError('You want to store a completely new trajectory with name'
                                ' `%s` but this trajectory is already found in file `%s`' %
                                (traj.v_name, self._filename))
 
         # Store meta information
         self._trj_store_meta_data(traj)
+
+        # Store group data
+        self._grp_store_group(traj, with_links=False)
 
         # # Store recursively the config subtree
         # self._tree_store_recursively(pypetconstants.LEAF,traj.config,self._trajectory_group)
@@ -625,8 +646,7 @@ class MongoStorageService(StorageService, HasLogger):
 
                 # Store recursively the elements
                 self._tree_store_sub_branch(traj, child_name, store_data=store_data,
-                                            with_links=True,
-                                            recursive=True, max_depth=max_depth)
+                                            with_links=True, recursive=True, max_depth=max_depth)
 
             self._logger.info('Finished storing Trajectory `%s`.' % self._trajectory_name)
         else:
@@ -680,12 +700,8 @@ class MongoStorageService(StorageService, HasLogger):
                                              'please use >>traj.f_store()<< '
                                              'before storing anything else.')
                         else:
-                            self._arctic.initialize_library(self._db_name + '.' + DATA_COLL)
-                    # Keep a reference to the top trajectory node
-                    self._db = self._client[self._db_name]
-                    self._arctic_lib = self._arctic[self._db_name + '.' + DATA_COLL]
-                    self._tree_coll = self._db[TREE_COLL]
-                    self._traj_coll = self._db[TRAJ_COLL]
+                            self._arctic.initialize_library(self._db_name + '.' +
+                                                            self._traj_stump + DATA_COLL)
                 else:
                     raise ValueError('I don`t know which trajectory to load')
                 self._logger.debug('Opening MongoDB `%s` in mode `a` with trajectory `%s`' %
@@ -699,10 +715,6 @@ class MongoStorageService(StorageService, HasLogger):
                         raise ValueError('File %s does not contain trajectory %s.'
                                          % (self._filename, self._trajectory_name))
 
-                    self._db = self._client[self._db_name]
-                    self._arctic_lib = self._arctic[LIB_PREFIX + self._db_name + '.' + DATA_COLL]
-                    self._tree_coll = self._db[TREE_COLL]
-                    self._traj_coll = self._db[TRAJ_COLL]
                 else:
                     raise ValueError('Please specify a name of a trajectory to load, '
                                      'otherwise I cannot open the databse.')
@@ -713,9 +725,23 @@ class MongoStorageService(StorageService, HasLogger):
             else:
                 raise RuntimeError('You shall not pass!')
 
+            # Keep a reference to the top trajectory node
+            self._db = self._client[self._db_name]
+            self._arctic_lib = self._arctic[self._db_name + '.' + self._traj_stump + '_'
+                                            + DATA_COLL]
+            self._tree_coll = self._db[self._traj_stump + '_' + TREE_COLL]
+            self._info_coll = self._db[self._traj_stump + '_' + INFO_COLL]
+            self._run_coll = self._db[self._traj_stump + '_' + RUN_COLL]
+
             self._node_processing_timer = NodeProcessingTimer(display_time=self._display_time,
                                                               logger_name=self._logger.name)
             self._is_open = True
+
+    def _set_db_name(self, db_name):
+        if db_name.startswith(self._arctic.DB_PREFIX):
+            self._db_name = self._db_name
+        else:
+            self._db_name = self._arctic.DB_PREFIX + '_' + db_name
 
     def _srvc_extract_file_information(self, kwargs):
         """Extracts file information from kwargs.
@@ -724,13 +750,17 @@ class MongoStorageService(StorageService, HasLogger):
         `pop` the elements on the level of the function calling `_srvc_extract_file_information`.
 
         """
+        if 'db_name' in kwargs:
+            self._set_db_name(kwargs.pop('db_name'))
 
         if 'trajectory_name' in kwargs:
             traj_name = kwargs.pop('trajectory_name')
             if self._traj_name is not None and (traj_name != self._traj_name):
                 self._srvc_closing_routine()
             self._traj_name = traj_name
-            self._db_name = self._traj_name.lower()[:MAX_DB_NAME_LENGTH]
+            self._traj_stump = self._traj_name.lower()[:MAX_NAME_LENGTH]
+            if self._db_name is None:
+                self._db_name._set_db_name(self._traj_stump)
 
     def _srvc_closing_routine(self):
         """Routine to close an hdf5 file
@@ -741,14 +771,19 @@ class MongoStorageService(StorageService, HasLogger):
 
         """
         self._client.close()
-        self._traj_coll = None
+        self._info_coll = None
         self._tree_coll = None
         self._arctic_lib = None
         self._mode = None
         self._traj_name = None
         self._db_name = None
         self._db = None
+        self._traj_stump = None
         self._is_open = False
+
+    @staticmethod
+    def _srvc_set_on_insert(coll, entry, how='$setOnInsert'):
+        coll.update_one({'_id': entry['_id_']}, {how:  entry}, upsert=True)
 
     def _trj_store_meta_data(self, traj):
         """ Stores general information about the trajectory in the hdf5file.
@@ -771,136 +806,233 @@ class MongoStorageService(StorageService, HasLogger):
                            'version': traj.v_version,
                            'python': traj.v_python}
         # 'loaded_from' : pt.StringCol(pypetconstants.HDF5_STRCOL_MAX_LOCATION_LENGTH)}
+        self._info_coll.update_one({'_id': 'info'}, {'$set': descriptiondict}, upsert=True)
 
-        self._trag_coll.
-
-        # Description of the `run` table
-        rundescription_dict = {'name': pt.StringCol(pypetconstants.HDF5_STRCOL_MAX_NAME_LENGTH,
-                                                    pos=1),
-                               'time': pt.StringCol(len(traj.v_time), pos=2),
-                               'timestamp': pt.FloatCol(pos=3),
-                               'idx': pt.IntCol(pos=0),
-                               'completed': pt.IntCol(pos=8),
-                               'parameter_summary': pt.StringCol(
-                                   pypetconstants.HDF5_STRCOL_MAX_COMMENT_LENGTH,
-                                   pos=6),
-                               'short_environment_hexsha': pt.StringCol(7, pos=7),
-                               'finish_timestamp': pt.FloatCol(pos=4),
-                               'runtime': pt.StringCol(
-                                   pypetconstants.HDF5_STRCOL_MAX_RUNTIME_LENGTH,
-                                   pos=5)}
-
-        runtable = self._all_get_or_create_table(where=self._overview_group,
-                                                 tablename='runs',
-                                                 description=rundescription_dict)
-
-        hdf5_description_dict = {'complib': pt.StringCol(7, pos=0),
-                                 'complevel': pt.IntCol(pos=1),
-                                 'shuffle': pt.BoolCol(pos=2),
-                                 'fletcher32': pt.BoolCol(pos=3),
-                                 'pandas_format': pt.StringCol(7, pos=4),
-                                 'encoding': pt.StringCol(11, pos=5)}
-
-        pos = 7
-        for name, table_name in HDF5StorageService.NAME_TABLE_MAPPING.items():
-            hdf5_description_dict[table_name] = pt.BoolCol(pos=pos)
-            pos += 1
-
-        # Store the hdf5 properties in an overview table
-        hdf5_description_dict.update({'purge_duplicate_comments': pt.BoolCol(pos=pos + 2),
-                                      'results_per_run': pt.IntCol(pos=pos + 3),
-                                      'derived_parameters_per_run': pt.IntCol(pos=pos + 4)})
-
-        hdf5table = self._all_get_or_create_table(where=self._overview_group,
-                                                  tablename='hdf5_settings',
-                                                  description=hdf5_description_dict)
-
-        insert_dict = {}
-        for attr_name in self.ATTR_LIST:
-            insert_dict[attr_name] = getattr(self, attr_name)
-
-        for attr_name, table_name in self.NAME_TABLE_MAPPING.items():
-            insert_dict[table_name] = getattr(self, attr_name)
-
-        for attr_name, name in self.PR_ATTR_NAME_MAPPING.items():
-            insert_dict[name] = getattr(self, attr_name)
-
-        self._all_add_or_modify_row(traj.v_name, insert_dict, hdf5table, index=0,
-                                    flags=(HDF5StorageService.ADD_ROW,
-                                           HDF5StorageService.MODIFY_ROW))
-
-
-        # Fill table with dummy entries starting from the current table size
-        actual_rows = runtable.nrows
-        self._trj_fill_run_table(traj, actual_rows, len(traj._run_information))
-        # stop != len(traj) to allow immediate post-proc with QUEUE wrapping
-
-        # Store the annotations and comment of the trajectory node
-        self._grp_store_group(traj, store_data=pypetconstants.STORE_DATA,
-                                  with_links=False,
-                                  recursive=False,
-                                  _hdf5_group=self._trajectory_group)
+        # # Description of the `run` table
+        # rundescription_dict = {'name': pt.StringCol(pypetconstants.HDF5_STRCOL_MAX_NAME_LENGTH,
+        #                                             pos=1),
+        #                        'time': pt.StringCol(len(traj.v_time), pos=2),
+        #                        'timestamp': pt.FloatCol(pos=3),
+        #                        'idx': pt.IntCol(pos=0),
+        #                        'completed': pt.IntCol(pos=8),
+        #                        'parameter_summary': pt.StringCol(
+        #                            pypetconstants.HDF5_STRCOL_MAX_COMMENT_LENGTH,
+        #                            pos=6),
+        #                        'short_environment_hexsha': pt.StringCol(7, pos=7),
+        #                        'finish_timestamp': pt.FloatCol(pos=4),
+        #                        'runtime': pt.StringCol(
+        #                            pypetconstants.HDF5_STRCOL_MAX_RUNTIME_LENGTH,
+        #                            pos=5)}
 
         # Store the list of explored paramters
         self._trj_store_explorations(traj)
 
-        # Prepare the exploration tables
-        # Prepare the overview tables
-        tostore_tables = []
-
-        for name, table_name in HDF5StorageService.NAME_TABLE_MAPPING.items():
-
-            # Check if we want the corresponding overview table
-            # If the trajectory does not contain information about the table
-            # we assume it should be created.
-
-            if getattr(self, name):
-                tostore_tables.append(table_name)
-
-        self._srvc_make_overview_tables(tostore_tables, traj)
-
     def _trj_load_exploration(self, traj):
         """Recalls names of all explored parameters"""
-        if hasattr(self._overview_group, 'explorations'):
-            explorations_table = ptcompat.get_child(self._overview_group, 'explorations')
-            for row in explorations_table.iterrows():
-                param_name = compat.tostr(row['explorations'])
-                if param_name not in traj._explored_parameters:
-                    traj._explored_parameters[param_name] = None
-        else:
-            # This is for backwards compatibility
-            for what in ('parameters', 'derived_parameters'):
-                if hasattr(self._trajectory_group, what):
-                    parameters = ptcompat.get_child(self._trajectory_group, what)
-                    for group in ptcompat.walk_groups(parameters):
-                        if self._all_get_from_attrs(group, HDF5StorageService.LENGTH):
-                            group_location = group._v_pathname
-                            full_name = '.'.join(group_location.split('/')[2:])
-                            traj._explored_parameters[full_name] = None
+        explorations_entry = self._info_coll.find_one({'_id': 'explorations'})
+        explorations_list = explorations_entry['explorations']
+        for param_name in explorations_list:
+            if param_name not in traj._explored_parameters:
+                traj._explored_parameters[param_name] = None
 
     def _trj_store_explorations(self, traj):
         """Stores a all explored parameter names for internal recall"""
         nexplored = len(traj._explored_parameters)
         if nexplored > 0:
             if hasattr(self._overview_group, 'explorations'):
-                explorations_table = ptcompat.get_child(self._overview_group, 'explorations')
-                if len(explorations_table) != nexplored:
-                    ptcompat.remove_node(self._hdf5file, where=self._overview_group,
-                                         name='explorations')
-        if not hasattr(self._overview_group, 'explorations'):
+                explorations_entry = self._info_coll.find_one({'_id': 'explorations'})
+                if explorations_entry is not None:
+                    explored_list = explorations_entry['explorations']
+                    if len(explored_list) != nexplored:
+                        self._info_coll.delete_one({'_id': 'explorations'})
             explored_list = compat.listkeys(traj._explored_parameters)
-            if explored_list:
-                string_col = self._all_get_table_col('explorations',
-                                                      explored_list,
-                                                      'overview.explorations')
+            self._srvc_set_on_insert(self._info_coll, {'_id': 'explorations',
+                                                       'explorations': explored_list})
+
+    def _tree_store_sub_branch(self, traj_node, branch_name,
+                               store_data=pypetconstants.STORE_DATA,
+                               with_links=True,
+                               recursive=False,
+                               max_depth=None):
+        """Stores data starting from a node along a branch and starts recursively loading
+        all data at end of branch.
+
+        :param traj_node: The node where storing starts
+
+        :param branch_name:
+
+            A branch along which storing progresses. Colon Notation is used:
+            'group1.group2.group3' loads 'group1', then 'group2', then 'group3', and then finally
+            recursively all children and children's children below 'group3'.
+
+        :param store_data: How data should be stored
+
+        :param with_links: If links should be stored
+
+        :param recursive:
+
+            If the rest of the tree should be recursively stored
+
+        :param max_depth:
+
+            Maximum depth to store
+
+        """
+        if store_data == pypetconstants.STORE_NOTHING:
+            return
+
+        if max_depth is None:
+            max_depth = float('inf')
+
+        node_entry = self._tree_coll.find_one({'_id': traj_node.v_full_name})
+        if node_entry is None:
+            # Get parent hdf5 node
+            location = traj_node.v_full_name
+            self._logger.debug('Cannot store `%s` the parental hdf5 node with location `%s` does '
+                                     'not exist on disk.' %
+                                     (traj_node.v_name, location))
+            if traj_node.v_is_leaf:
+                self._logger.error('Cannot store `%s` the parental hdf5 '
+                                   'node with locations `%s` does '
+                                   'not exist on disk! The child '
+                                   'you want to store is a leaf node,'
+                                   'that cannot be stored without '
+                                   'the parental node existing on '
+                                   'disk.' % (traj_node.v_name, location))
+                raise
             else:
-                string_col = pt.StringCol(1)
-            description = {'explorations': string_col}
-            explorations_table = ptcompat.create_table(self._hdf5file,
-                                                       where=self._overview_group,
-                                                       name='explorations',
-                                                       description=description)
-            rows = [(compat.tobytes(x),) for x in explored_list]
-            if rows:
-                explorations_table.append(rows)
-                explorations_table.flush()
+                self._logger.debug('I will try to store the path from trajectory root to '
+                                     'the child now.')
+
+                self._tree_store_sub_branch(traj_node._nn_interface._root_instance,
+                                            traj_node.v_full_name + '.' + branch_name,
+                                            store_data=store_data, with_links=with_links,
+                                            recursive=recursive,
+                                            max_depth=max_depth + traj_node.v_depth)
+                return
+
+        current_depth = 1
+
+        split_names = branch_name.split('.')
+
+        leaf_name = split_names.pop()
+
+        for name in split_names:
+            if current_depth > max_depth:
+                return
+            # Store along a branch
+            self._tree_store_nodes_dfs(traj_node, name, store_data=store_data,
+                                       with_links=with_links,
+                                       recursive=False, max_depth=max_depth,
+                                       current_depth=current_depth)
+            current_depth += 1
+
+            traj_node = traj_node._children[name]
+
+            hdf5_group = getattr(hdf5_group, name)
+
+        # Store final group and recursively everything below it
+        if current_depth <= max_depth:
+            self._tree_store_nodes_dfs(traj_node, leaf_name, store_data=store_data,
+                               with_links=with_links, recursive=recursive,
+                               max_depth=max_depth, current_depth=current_depth)
+
+    def _grp_store_group(self, traj_group, store_data=pypetconstants.STORE_DATA,
+                         with_links=True, recursive=False, max_depth=None):
+        """Stores a group node.
+
+        For group nodes only annotations and comments need to be stored.
+
+        """
+        if store_data == pypetconstants.STORE_NOTHING:
+            return
+        elif store_data == pypetconstants.STORE_DATA_SKIPPING and traj_group._stored:
+            self._logger.debug('Already found `%s` on disk I will not store it!' %
+                                   traj_group.v_full_name)
+        elif not recursive:
+
+            overwrite = store_data == pypetconstants.OVERWRITE_DATA
+
+            if overwrite:
+                option = '$set'
+            else:
+                option = '$setOnInsert'
+
+            data = {'_id': traj_group.v_full_name,
+                    self.CLASS_NAME: traj_group.f_get_class_name()}
+
+            if traj_group.v_comment != '':
+                option = '$set'
+                data[self.COMMENT] = traj_group.v_comment
+
+            if not traj_group.v_annotations.f_is_empty():
+                option = '$set'
+                annotations = traj_group.v_annotations.f_to_dict()
+                entry = self._tree_coll.find_one({'_id': traj_group.v_full_name})
+                if entry is None:
+                    data[self.ANNOTATIONS] = annotations
+                else:
+                    if self.ANNOTATIONS in entry:
+                        old_annotations = entry[self.ANNOTATIONS]
+                    else:
+                        old_annotations = {}
+                    for key in annotations:
+                        if key not in old_annotations:
+                            old_annotations[key] = annotations[key]
+                    data[self.ANNOTATIONS] = old_annotations
+
+            self._srvc_set_on_insert(data, how=option)
+            traj_group._stored = True
+
+            # Signal completed node loading
+            self._node_processing_timer.signal_update()
+
+        if recursive:
+            parent_traj_group = traj_group.f_get_parent()
+
+            self._tree_store_nodes_dfs(parent_traj_group, traj_group.v_name, store_data=store_data,
+                                       with_links=with_links, recursive=recursive,
+                                       max_depth=max_depth, current_depth=0)
+
+    def _tree_store_nodes_dfs(self, parent_traj_node, name, store_data, with_links, recursive,
+                          max_depth, current_depth):
+        """Stores a node to hdf5 and if desired stores recursively everything below it.
+
+        :param parent_traj_node: The parental node
+        :param name: Name of node to be stored
+        :param store_data: How to store data
+        :param with_links: If links should be stored
+        :param recursive: Whether to store recursively the subtree
+        :param max_depth: Maximum recursion depth in tree
+        :param current_depth: Current depth
+
+        """
+        if max_depth is None:
+            max_depth = float('inf')
+
+        store_list = [(parent_traj_node, name, current_depth)]
+
+        while store_list:
+            parent_traj_node, name, current_depth = store_list.pop()
+
+            # Check if we create a link
+            if name in parent_traj_node._links:
+                if with_links:
+                    self._tree_store_link(parent_traj_node, name)
+                    self._tree_coll.update_one({'_id': parent_traj_node.v_fullname},
+                                               {'addToSet'}) #TODO HERE!!!
+                continue
+
+            traj_node = parent_traj_node._children[name]
+
+            if traj_node.v_is_leaf:
+                self._prm_store_parameter_or_result(traj_node, store_data=store_data)
+
+            else:
+                self._grp_store_group(traj_node, store_data=store_data, with_links=with_links,
+                                      recursive=False, max_depth=max_depth)
+
+                if recursive and current_depth < max_depth:
+                    for child in compat.iterkeys(traj_node._children):
+                        store_list.append((traj_node, child, current_depth + 1))
+
