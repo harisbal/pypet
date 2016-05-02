@@ -1204,6 +1204,75 @@ class ResultSortTest(TrajectoryComparator):
         traj.v_shortcuts=True
 
 
+class ResultSortTestMongo(ResultSortTest):
+
+    tags = 'integration', 'mongo', 'environment'
+
+    def set_mode(self):
+        self.mode = None
+        self.multiproc = False
+        self.ncores = 1
+        self.use_pool=True
+        self.log_stdout=False
+        self.freeze_input=False
+        self.use_scoop = False
+        self.log_config = True
+        self.port = None
+        self.graceful_exit = True
+        self.mongo_host = 'localhost'
+        self.mongo_port = None
+        self.overwrite_db = True
+
+    def setUp(self):
+        self.set_mode()
+
+        self.trajname = make_trajectory_name(self)
+
+        self.mongo_db = 'arctic_' + self.trajname.lower()[:32]
+
+        env = Environment(trajectory=self.trajname,
+                          mongo_db=self.mongo_db,
+                          mongo_host = self.mongo_host,
+                          mongo_port = self.mongo_port,
+                          storage_service=None,
+                          log_stdout=self.log_stdout,
+                          log_config=get_log_config() if self.log_config else None,
+                          multiproc=self.multiproc,
+                          wrap_mode=self.mode,
+                          ncores=self.ncores,
+                          use_pool=self.use_pool,
+                          use_scoop=self.use_scoop,
+                          port=self.port,
+                          overwrite_db=self.overwrite_db,
+                          freeze_input=self.freeze_input,
+                          graceful_exit=self.graceful_exit)
+
+        traj = env.v_trajectory
+
+
+        traj.v_standard_parameter=Parameter
+
+        traj.f_add_parameter('x',99)
+        traj.f_add_parameter('y',99)
+
+        self.env=env
+        self.traj=traj
+
+    def tearDown(self):
+        self.env.f_disable_logging()
+        import pymongo
+        if isinstance(self.mongo_host, pymongo.MongoClient):
+            client = self.mongo_host
+        else:
+            client = pymongo.MongoClient(self.mongo_host, self.mongo_port)
+
+        client.drop_database(self.mongo_db)
+        super(ResultSortTest, self).tearDown()
+
+    def test_if_results_are_sorted_correctly(self):
+        super(ResultSortTestMongo, self).test_if_results_are_sorted_correctly()
+
+
 # def test_runfunc(traj, list_that_changes):
 #     traj.f_add_result('kkk', list_that_changes[traj.v_idx] + traj.v_idx)
 #     list_that_changes[traj.v_idx] = 1000

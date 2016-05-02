@@ -24,7 +24,7 @@ from pypet.pypetlogging import HasLogger, DisableAllLogging
 from pypet.storageservice import NodeProcessingTimer
 
 
-MAX_NAME_LENGTH = 50
+MAX_NAME_LENGTH = 32
 TREE_COLL = 'tree'
 INFO_COLL = 'info'
 RUN_COLL = 'runs'
@@ -32,7 +32,11 @@ DATA_COLL = 'data'
 
 
 class MongoStorageService(StorageService, HasLogger):
-    def __init__(self, mongo_host='localhost', mongo_port=27017, max_bulk_length=500, protocol=2):
+    def __init__(self, mongo_host='localhost', mongo_port=27017,
+                 mongo_db = None, trajectory=None,
+                 max_bulk_length=0, protocol=2,
+                 display_time = 20,
+                 overwrite_db=False):
         self._set_logger()
         if isinstance(mongo_host, compat.base_type):
             self._mongo_host = mongo_host
@@ -42,6 +46,7 @@ class MongoStorageService(StorageService, HasLogger):
             self._client = mongo_host
             self._mongo_host = None
             self._mongo_port = None
+
         self._protocol = protocol
         self._arctic = arctic.Arctic(self._client)
         self._max_bulk_length = max_bulk_length
@@ -51,10 +56,23 @@ class MongoStorageService(StorageService, HasLogger):
         self._arctic_lib = None
         self._mode = None
         self._traj_name = None
+        self._traj_index = None
         self._traj_stump = None
         self._db_name = None
+        self._bulk = []
+
+        if mongo_db is None and trajectory is not None:
+            mongo_db = trajectory.v_name.lower()[:MAX_NAME_LENGTH]
+        elif mongo_db is None:
+            mongo_db = 'experiments'
+
+        self._srvc_set_db_name(mongo_db)
         self._db = None
         self._is_open = False
+        self._display_time = display_time
+
+        if overwrite_db and self._db_name in self._client.database_names():
+            self._client.drop_database(self._db_name)
 
     CLASS_NAME = 'class_name'
     ''' Name of a parameter or result class, is converted to a constructor'''
@@ -75,6 +93,12 @@ class MongoStorageService(StorageService, HasLogger):
     '''Leaves entry'''
     DATA = 'data'
     '''data entry'''
+
+    INFO = 'info'
+    '''Info entry'''
+    EXPLORATIONS = 'explorations'
+    '''Explorations entry'''
+
 
     @property
     def is_open(self):
@@ -256,37 +280,6 @@ class MongoStorageService(StorageService, HasLogger):
 
                     How to store the data, see above for a descitpion.
 
-                :param store_flags: Flags describing how to store data.
-
-                        :const:`~pypet.HDF5StorageService.ARRAY` ('ARRAY')
-
-                            Store stuff as array
-
-                        :const:`~pypet.HDF5StorageService.CARRAY` ('CARRAY')
-
-                            Store stuff as carray
-
-                        :const:`~pypet.HDF5StorageService.TABLE` ('TABLE')
-
-                            Store stuff as pytable
-
-                        :const:`~pypet.HDF5StorageService.DICT` ('DICT')
-
-                            Store stuff as pytable but reconstructs it later as dictionary
-                            on loading
-
-                        :const:`~pypet.HDF%StorageService.FRAME` ('FRAME')
-
-                            Store stuff as pandas data frame
-
-                    Storage flags can also be provided by the parameters and results themselves
-                    if they implement a function '_store_flags' that returns a dictionary
-                    with the names of the data to store as keys and the flags as values.
-
-                    If no storage flags are provided, they are automatically inferred from the
-                    data. See :const:`pypet.HDF5StorageService.TYPE_FLAG_MAPPING` for the mapping
-                    from type to flag.
-
                 :param overwrite:
 
                     Can be used if parts of a leaf should be replaced. Either a list of
@@ -447,12 +440,6 @@ class MongoStorageService(StorageService, HasLogger):
 
         :param trajectory_name: Name of current trajectory and name of top node in hdf5 file.
 
-        :param trajectory_index:
-
-            If no `trajectory_name` is provided, you can specify an integer index.
-            The trajectory at the index position in the hdf5 file is considered to loaded.
-            Negative indices are also possible for reverse indexing.
-
         :param filename: Name of the hdf5 file
 
 
@@ -607,18 +594,18 @@ class MongoStorageService(StorageService, HasLogger):
 
         """
         if not only_init:
-            self._logger.info('Start storing Trajectory `%s`.' % self._trajectory_name)
+            self._logger.info('Start storing Trajectory `%s`.' % self._traj_name)
         else:
             self._logger.info('Initialising storage or updating meta data of Trajectory `%s`.' %
-                              self._trajectory_name)
+                              self._traj_name)
             store_data = pypetconstants.STORE_NOTHING
 
         # In case we accidentally chose a trajectory name that already exist
         # We do not want to mess up the stored trajectory but raise an Error
-        if not traj._stored and self._info_coll is not None:
+        if not traj._stored and self._info_coll.count() > 0:
             raise RuntimeError('You want to store a completely new trajectory with name'
-                               ' `%s` but this trajectory is already found in file `%s`' %
-                               (traj.v_name, self._filename))
+                               ' `%s` but this trajectory is already found in DB `%s`' %
+                               (traj.v_name, self._db_name))
 
         # Store meta information
         self._trj_store_meta_data(traj)
@@ -655,7 +642,7 @@ class MongoStorageService(StorageService, HasLogger):
                 self._tree_store_sub_branch(traj, child_name, store_data=store_data,
                                             with_links=True, recursive=True, max_depth=max_depth)
 
-            self._logger.info('Finished storing Trajectory `%s`.' % self._trajectory_name)
+            self._logger.info('Finished storing Trajectory `%s`.' % self._traj_name)
         else:
             self._logger.info('Finished init or meta data update for `%s`.' %
                               self._traj_name)
@@ -668,13 +655,13 @@ class MongoStorageService(StorageService, HasLogger):
 
         """
 
-        runtable = getattr(self._overview_group, 'runs')
-
         rows = []
         updated_run_information = traj._updated_run_information
         for idx in compat.xrange(start, stop):
             info_dict = traj._run_information[traj._single_run_ids[idx]]
-            rows.append(pymongo.InsertOne(dict(_id = info_dict['idx']).update(info_dict)))
+            insert_dict = dict(_id = info_dict['idx'])
+            insert_dict.update(info_dict)
+            rows.append(pymongo.InsertOne(insert_dict))
             updated_run_information.discard(idx)
 
         if rows:
@@ -685,14 +672,56 @@ class MongoStorageService(StorageService, HasLogger):
         indices = []
         for idx in updated_run_information:
             info_dict = traj.f_get_run_information(idx, copy=False)
+            insert_dict = dict(_id = info_dict['idx'])
+            insert_dict.update(info_dict)
             rows.append(pymongo.UpdateOne({'_id': info_dict['idx']},
-                                    {'$set': dict(_id=info_dict['idx']).update(info_dict)}))
+                                    {'$set': insert_dict}))
             indices.append(idx)
 
         if rows:
             self._run_coll.bulk_write(rows)
 
         traj._updated_run_information = set()
+
+    def _srvc_store_several_items(self, iterable, *args, **kwargs):
+        """Stores several items from an iterable
+
+        Iterables are supposed to be of a format like `[(msg, item, args, kwarg),...]`
+        If `args` and `kwargs` are not part of a tuple, they are taken from the
+        current `args` and `kwargs` provided to this function.
+
+        """
+        for input_tuple in iterable:
+            msg = input_tuple[0]
+            item = input_tuple[1]
+            if len(input_tuple) > 2:
+                args = input_tuple[2]
+            if len(input_tuple) > 3:
+                kwargs = input_tuple[3]
+            if len(input_tuple) > 4:
+                raise RuntimeError('You shall not pass!')
+
+            self.store(msg, item, *args, **kwargs)
+
+    def _srvc_load_several_items(self, iterable, *args, **kwargs):
+        """Loads several items from an iterable
+
+        Iterables are supposed to be of a format like `[(msg, item, args, kwarg),...]`
+        If `args` and `kwargs` are not part of a tuple, they are taken from the
+        current `args` and `kwargs` provided to this function.
+
+        """
+        for input_tuple in iterable:
+            msg = input_tuple[0]
+            item = input_tuple[1]
+            if len(input_tuple) > 2:
+                args = input_tuple[2]
+            if len(input_tuple) > 3:
+                kwargs = input_tuple[3]
+            if len(input_tuple) > 4:
+                raise RuntimeError('You shall not pass!')
+
+            self.load(msg, item, *args, **kwargs)
 
     def _srvc_opening_routine(self, mode, msg=None, kwargs=()):
         """Opens an hdf5 file for reading or writing
@@ -732,7 +761,7 @@ class MongoStorageService(StorageService, HasLogger):
             if 'a' in mode:
 
                 if self._db_name is not None:
-                    if self._db_name in self._client.database_names():
+                    if self._db_name not in self._client.database_names():
                         # If we want to store individual items we we have to check if the
                         # trajectory has been stored before
                         if not msg == pypetconstants.TRAJECTORY:
@@ -741,23 +770,16 @@ class MongoStorageService(StorageService, HasLogger):
                                              'before storing anything else.')
                         else:
                             self._arctic.initialize_library(self._db_name + '.' +
-                                                            self._traj_stump + DATA_COLL)
+                                                            self._traj_stump + '_' + DATA_COLL)
                 else:
                     raise ValueError('I don`t know which trajectory to load')
                 self._logger.debug('Opening MongoDB `%s` in mode `a` with trajectory `%s`' %
                                    (self._db_name, self._traj_name))
 
             elif mode == 'r':
-
-                if self._trajectory_name is not None:
-                    # Otherwise pick the trajectory group by name
-                    if not '/' + self._trajectory_name in self._hdf5file:
-                        raise ValueError('File %s does not contain trajectory %s.'
-                                         % (self._filename, self._trajectory_name))
-
-                else:
-                    raise ValueError('Please specify a name of a trajectory to load, '
-                                     'otherwise I cannot open the databse.')
+                if self._traj_name is not None and self._traj_index is not None:
+                    raise ValueError('Please specify either a name of a trajectory or an index, '
+                                     'but not both at the same time.')
 
                 self._logger.debug('Opening MongoDB `%s` in mode `r` with trajectory `%s`' %
                                    (self._db_name, self._traj_name))
@@ -777,9 +799,9 @@ class MongoStorageService(StorageService, HasLogger):
                                                               logger_name=self._logger.name)
             self._is_open = True
 
-    def _set_db_name(self, db_name):
+    def _srvc_set_db_name(self, db_name):
         if db_name.startswith(self._arctic.DB_PREFIX):
-            self._db_name = self._db_name
+            self._db_name = db_name
         else:
             self._db_name = self._arctic.DB_PREFIX + '_' + db_name
 
@@ -790,8 +812,8 @@ class MongoStorageService(StorageService, HasLogger):
         `pop` the elements on the level of the function calling `_srvc_extract_file_information`.
 
         """
-        if 'db_name' in kwargs:
-            self._set_db_name(kwargs.pop('db_name'))
+        if 'mongo_db' in kwargs:
+            self._srvc_set_db_name(kwargs.pop('mongo_db'))
 
         if 'trajectory_name' in kwargs:
             traj_name = kwargs.pop('trajectory_name')
@@ -800,7 +822,10 @@ class MongoStorageService(StorageService, HasLogger):
             self._traj_name = traj_name
             self._traj_stump = self._traj_name.lower()[:MAX_NAME_LENGTH]
             if self._db_name is None:
-                self._db_name._set_db_name(self._traj_stump)
+                self._srvc_set_db_name(self._traj_stump)
+
+        if 'trajectory_index' in kwargs:
+            self._traj_index = kwargs.pop('trajectory_index')
 
     def _srvc_closing_routine(self):
         """Routine to close an hdf5 file
@@ -817,10 +842,10 @@ class MongoStorageService(StorageService, HasLogger):
         self._arctic_lib = None
         self._mode = None
         self._traj_name = None
-        self._db_name = None
         self._db = None
         self._traj_stump = None
         self._is_open = False
+        self._traj_index = None
 
     def _srvc_flush_tree_db(self):
         if self._bulk:
@@ -845,7 +870,7 @@ class MongoStorageService(StorageService, HasLogger):
 
         # Description of the `info` table
 
-        descriptiondict = {'_id' : 'info',
+        descriptiondict = {'_id' : self.INFO,
                            'name': traj.v_name,
                            'time': traj.v_time,
                            'timestamp': traj.v_timestamp,
@@ -854,10 +879,10 @@ class MongoStorageService(StorageService, HasLogger):
                            'version': traj.v_version,
                            'python': traj.v_python}
         # 'loaded_from' : pt.StringCol(pypetconstants.HDF5_STRCOL_MAX_LOCATION_LENGTH)}
-        self._info_coll.update_one({'_id': 'info'}, {'$set': descriptiondict}, upsert=True)
+        self._info_coll.update_one({'_id': self.INFO}, {'$set': descriptiondict}, upsert=True)
 
         # Fill table with dummy entries starting from the current table size
-        actual_rows = self._run_coll.coun()
+        actual_rows = self._run_coll.count()
         self._trj_fill_run_table(traj, actual_rows, len(traj._run_information))
 
         # Store the list of explored paramters
@@ -865,9 +890,10 @@ class MongoStorageService(StorageService, HasLogger):
 
     def _trj_load_exploration(self, traj):
         """Recalls names of all explored parameters"""
-        explorations_entry = self._info_coll.find_one({'_id': 'explorations'})
-        explorations_list = explorations_entry['explorations']
+        explorations_entry = self._info_coll.find_one({'_id': self.EXPLORATIONS})
+        explorations_list = explorations_entry[self.EXPLORATIONS]
         for param_name in explorations_list:
+            param_name = compat.tostr(param_name)
             if param_name not in traj._explored_parameters:
                 traj._explored_parameters[param_name] = None
 
@@ -875,15 +901,15 @@ class MongoStorageService(StorageService, HasLogger):
         """Stores a all explored parameter names for internal recall"""
         nexplored = len(traj._explored_parameters)
         if nexplored > 0:
-            if hasattr(self._overview_group, 'explorations'):
-                explorations_entry = self._info_coll.find_one({'_id': 'explorations'})
-                if explorations_entry is not None:
-                    explored_list = explorations_entry['explorations']
-                    if len(explored_list) != nexplored:
-                        self._info_coll.delete_one({'_id': 'explorations'})
+            explorations_entry = self._info_coll.find_one({'_id': self.EXPLORATIONS})
+            if explorations_entry is not None:
+                explored_list = explorations_entry[self.EXPLORATIONS]
+                if len(explored_list) != nexplored:
+                    self._info_coll.delete_one({'_id': self.EXPLORATIONS})
             explored_list = compat.listkeys(traj._explored_parameters)
-            self._info_coll.update_one( {'_id': 'explorations'},  {'$set': {'_id': 'explorations',
-                                                       'explorations': explored_list}})
+            self._info_coll.update_one( {'_id': self.EXPLORATIONS},  {'$set':
+                                                        {'_id': self.EXPLORATIONS,
+                                                       self.EXPLORATIONS: explored_list}})
 
     def _tree_store_sub_branch(self, traj_node, branch_name,
                                store_data=pypetconstants.STORE_DATA,
@@ -1099,18 +1125,17 @@ class MongoStorageService(StorageService, HasLogger):
             self._tree_store_sub_branch(root, linked_traj_node.v_full_name,
                                         store_data=pypetconstants.STORE_DATA_SKIPPING,
                                         with_links=False, recursive=False)
-        self._srvc_update_db(entry={self.LINKS: linked_traj_node.v_full_name},
+        self._srvc_update_db(entry={self.LINKS: [link, linked_traj_node.v_full_name]},
                                          _id= node_in_traj.v_full_name,
                                          how='$addToSet')
 
     def _prm_store_parameter_or_result(self,
                                        instance,
                                        store_data=pypetconstants.STORE_DATA,
-                                       store_flags=None,
                                        overwrite=None,
                                        with_links=False,
                                        recursive=False,
-                                       parent_name=None
+                                       parent_name=None,
                                        **kwargs):
         """Stores a parameter or result to hdf5.
 
@@ -1121,10 +1146,6 @@ class MongoStorageService(StorageService, HasLogger):
         :param store_data:
 
             How to store data
-
-        :param store_flags:
-
-            Dictionary containing how to store individual data, usually empty.
 
         :param overwrite:
 
@@ -1166,10 +1187,11 @@ class MongoStorageService(StorageService, HasLogger):
                 if isinstance(overwrite, compat.base_type):
                     overwrite = [overwrite]
 
-                if overwrite is True and entry is not None:
-                    to_delete = [instance.v_full_name + '.' + x for x in entry[self.DATA]]
-                    self._all_delete_parameter_or_result_or_group(instance,
-                                                                  delete_only=to_delete)
+                if overwrite is True:
+                    if entry is not None:
+                        to_delete = [instance.v_full_name + '.' + x for x in entry[self.DATA]]
+                        self._all_delete_parameter_or_result_or_group(instance,
+                                                                      delete_only=to_delete)
 
                 elif isinstance(overwrite, (list, tuple)):
                     overwrite_set = set(overwrite)
@@ -1347,7 +1369,7 @@ class MongoStorageService(StorageService, HasLogger):
 
 
     def _tree_load_nodes_dfs(self, parent_traj_node, load_data, with_links, recursive,
-                             max_depth, current_depth, trajectory, as_new, entry):
+                             max_depth, current_depth, trajectory, as_new, child_info):
         """Loads a node from hdf5 file and if desired recursively everything below
 
         :param parent_traj_node: The parent node whose child should be loaded
@@ -1364,18 +1386,38 @@ class MongoStorageService(StorageService, HasLogger):
         if max_depth is None:
             max_depth = float('inf')
 
-        loading_list = [(parent_traj_node, current_depth, entry)]
+        loading_list = [(parent_traj_node, current_depth, child_info)]
 
         while loading_list:
-            parent_traj_node, current_depth, entry = loading_list.pop()
+            parent_traj_node, current_depth, child_info = loading_list.pop()
+            name, full_name = child_info
+            entry = self._tree_coll.find_one({'_id': full_name})
 
-            full_name = entry['_id']
-            name = full_name.split('.')[-1]
+            if entry is None:
+
+                self._srvc_update_db()
+                if name in parent_traj_node._links:
+                    self._logger.error('Could not find link to `%s` in DB, will '
+                                   'remove it from parent DB entry.' % full_name)
+                    self._tree_coll.update_one({'_id': parent_traj_node.v_full_name},
+                                           {'$pull': {self.LINKS: child_info}})
+                    continue
+                else:
+                    raise pex.DataNotInStorageError('Could not find `%s`!' % full_name)
+                # elif child_name in parent_traj_node._groups:
+                #     self._tree_coll.update_one({'_id': parent_traj_node.v_full_name},
+                #                            {'$pull': {self.GROUPS: child_name}})
+                # elif child_name in parent_traj_node._leaves:
+                #     self._tree_coll.update_one({'_id': parent_traj_node.v_full_name},
+                #                            {'$pull': {self.LEAVES: child_name}})
+                # else:
+                #     raise RuntimeError('You shall not pass')
+
             if name in parent_traj_node._links:
                 if with_links:
                     # We end up here when auto-loading a soft link
                     self._tree_load_link(parent_traj_node, load_data=load_data, traj=trajectory,
-                                         as_new=as_new, hdf5_soft_link=entry)
+                                         as_new=as_new, link_info=child_info)
                 continue
 
             is_leaf = self.LEAF in entry
@@ -1426,21 +1468,584 @@ class MongoStorageService(StorageService, HasLogger):
                     new_depth = current_depth + 1
                     for what in (self.GROUPS, self.LEAVES):
                         for child in entry.get(what, []):
-                            new_entry = self._tree_coll.find_one({'_id':
-                                                        traj_group.v_full_name + '.' + child})
-                            if new_entry is None:
-                                self._logger.warning('Did not find `%s`! '
-                                                     'Will remove it.' % child)
-                                self._tree_coll.update_one({'_id': traj_group.v_full_name},
-                                           {'$pull': {what: child}})
-                            else:
-                                loading_list.append((traj_group, new_depth, new_entry))
-                    for full_child_name in entry.get(self.LINKS, []):
-                        new_entry = self._tree_coll.find_one({'_id': full_child_name})
-                        if new_entry is None:
-                            self._logger.warning('Did not find `%s`! '
-                                                 'Will remove link' % full_child_name)
-                            self._tree_coll.update_one({'_id': traj_group.v_full_name},
-                                       {'$pull': {self.LINKS: full_child_name}})
-                        else:
-                            loading_list.append((traj_group, new_depth, new_entry))
+                            child_full_name = traj_group.v_full_name + '.' + child
+                            loading_list.append((traj_group, new_depth, (child, child_full_name)))
+                    for child_info in entry.get(self.LINKS, []):
+                        loading_list.append((traj_group, new_depth, child_info))
+
+    def _grp_load_group(self, traj_group, load_data=pypetconstants.LOAD_DATA, with_links=True,
+                        recursive=False, max_depth=None,
+                        _traj=None, _as_new=False, _entry=None):
+        """Loads a group node and potentially everything recursively below"""
+        if _entry is None:
+            _entry = self._tree_coll.find_one({'_id': traj_group.v_full_name})
+            if _entry is None:
+                raise pex.DataNotInStorageError('Could not find `%s` in DB!' %
+                                                traj_group.v_full_name)
+
+        if recursive:
+            parent_traj_node = traj_group.f_get_parent()
+            self._tree_load_nodes_dfs(parent_traj_node, load_data=load_data, with_links=with_links,
+                                  recursive=recursive, max_depth=max_depth,
+                                  current_depth=0,
+                                  trajectory=_traj, as_new=_as_new,
+                                  child_info=(traj_group.v_name, traj_group.v_full_name))
+        else:
+            if load_data == pypetconstants.LOAD_NOTHING:
+                return
+
+            elif load_data == pypetconstants.OVERWRITE_DATA:
+                traj_group.v_annotations.f_empty()
+                traj_group.v_comment = ''
+
+            self._all_load_skeleton(traj_group, _entry)
+            traj_group._stored = not _as_new
+
+            # Signal completed node loading
+            self._node_processing_timer.signal_update()
+
+    def _all_load_skeleton(self, traj_node, entry):
+        """Reloads skeleton data of a tree node"""
+        if traj_node.v_annotations.f_is_empty():
+            self._ann_load_annotations(traj_node, entry)
+        if traj_node.v_comment == '':
+            comment = entry.get(self.COMMENT, '')
+            traj_node.v_comment = comment
+
+    def _ann_load_annotations(self, item_with_annotations, entry):
+        """Loads annotations from disk."""
+        annotated = self.ANNOTATIONS in entry
+        if annotated:
+            annotations = item_with_annotations.v_annotations
+            # You can only load into non-empty annotations, to prevent overwriting data in RAM
+            if not annotations.f_is_empty():
+                raise TypeError('Loading into non-empty annotations!')
+            anno_dict = pickle.loads(entry[self.ANNOTATIONS])
+            annotations.f_set(**anno_dict)
+
+    def _tree_load_link(self, new_traj_node, load_data, traj, as_new, link_info):
+        """ Loads a link
+
+        :param new_traj_node: Node in traj containing link
+        :param load_data: How to load data in the linked node
+        :param traj: The trajectory
+        :param as_new: If data in linked node should be loaded as new
+        :param entry: The link db entry
+
+        """
+
+        link_name, full_name = link_info
+
+        if (not link_name in new_traj_node._links or
+                    load_data==pypetconstants.OVERWRITE_DATA):
+
+            if not full_name in traj:
+                self._tree_load_sub_branch(traj, full_name,
+                                           load_data=pypetconstants.LOAD_SKELETON,
+                                           with_links=False, recursive=False, _trajectory=traj,
+                                           _as_new=as_new)
+
+            if (load_data == pypetconstants.OVERWRITE_DATA and
+                        link_name in new_traj_node._links):
+                new_traj_node.f_remove_link(link_name)
+            if not link_name in new_traj_node._links:
+                new_traj_node._nn_interface._add_generic(new_traj_node,
+                                                            type_name=nn.LINK,
+                                                            group_type_name=nn.GROUP,
+                                                            args=(link_name,
+                                                                  traj.f_get(full_name)),
+                                                            kwargs={},
+                                                            add_prefix=False,
+                                                            check_naming=False)
+            else:
+                raise RuntimeError('You shall not pass!')
+
+
+    def _tree_load_sub_branch(self, traj_node, branch_name,
+                              load_data=pypetconstants.LOAD_DATA,
+                              with_links=True, recursive=False,
+                              max_depth=None, _trajectory=None,
+                              _as_new=False):
+        """Loads data starting from a node along a branch and starts recursively loading
+        all data at end of branch.
+
+        :param traj_node: The node from where loading starts
+
+        :param branch_name:
+
+            A branch along which loading progresses. Colon Notation is used:
+            'group1.group2.group3' loads 'group1', then 'group2', then 'group3' and then finally
+            recursively all children and children's children below 'group3'
+
+        :param load_data:
+
+            How to load the data
+
+
+        :param with_links:
+
+            If links should be loaded
+
+        :param recursive:
+
+            If loading recursively
+
+        :param max_depth:
+
+            The maximum depth to load the tree
+
+        :param _trajectory:
+
+            The trajectory
+
+        :param _as_new:
+
+            If trajectory is loaded as new
+
+        """
+        if load_data == pypetconstants.LOAD_NOTHING:
+            return
+
+        if max_depth is None:
+            max_depth = float('inf')
+
+        if _trajectory is None:
+            _trajectory = traj_node.v_root
+
+        split_names = branch_name.split('.')
+
+        final_group_name = split_names.pop()
+
+        current_depth = 1
+
+        current_name = traj_node.v_full_name
+        for name in split_names:
+            if current_depth > max_depth:
+                return
+            # First load along the branch
+            current_name += '.%s' % name
+            self._tree_load_nodes_dfs(traj_node, load_data=load_data, with_links=with_links,
+                                  recursive=False, max_depth=max_depth,
+                                  current_depth=current_depth,
+                                  trajectory=_trajectory, as_new=_as_new,
+                                  child_info=(name, current_name))
+
+            current_depth += 1
+
+            traj_node = traj_node._children[name]
+
+        if current_depth <= max_depth:
+            # Then load recursively all data in the last group and below
+            current_name += '.%s' % final_group_name
+            self._tree_load_nodes_dfs(traj_node, load_data=load_data, with_links=with_links,
+                                  recursive=recursive, max_depth=max_depth,
+                                  current_depth=current_depth, trajectory=_trajectory,
+                                  as_new=_as_new,
+                                  child_info=(final_group_name, current_name))
+
+    def _prm_load_parameter_or_result(self, instance,
+                                      load_data=pypetconstants.LOAD_DATA,
+                                      load_only=None,
+                                      load_except=None,
+                                      with_links=False,
+                                      recursive=False,
+                                      max_depth=None,
+                                      _entry=None,):
+        """Loads a parameter or result from disk.
+
+        :param instance:
+
+            Empty parameter or result instance
+
+        :param load_data:
+
+            How to load stuff
+
+        :param load_only:
+
+            List of data keys if only parts of a result should be loaded
+
+        :param load_except:
+
+            List of data key that should NOT be loaded.
+
+        :param with_links:
+
+            Placeholder, because leaves have no links
+
+        :param recursive:
+
+            Dummy variable, no-op because leaves have no children
+
+        :param max_depth:
+
+            Dummy variable, no-op because leaves have no children
+
+        :param _entry:
+
+            The corresponding DB entry of the instance
+
+        """
+        if load_data == pypetconstants.LOAD_NOTHING:
+            return
+
+        if _entry is None:
+            _entry = self._tree_coll.find_one({'_id': instance.v_full_name})
+            if _entry is None:
+                raise pex.DataNotInStorageError('Could not find `%s` '
+                                                'in DB' % instance.v_full_name)
+
+        if load_data == pypetconstants.OVERWRITE_DATA:
+            if instance.v_is_parameter and instance.v_locked:
+                self._logger.debug('Parameter `%s` is locked, I will skip loading.' %
+                                     instance.v_full_name)
+                return
+            instance.f_empty()
+            instance.v_annotations.f_empty()
+            instance.v_comment = ''
+
+        self._all_load_skeleton(instance, _entry)
+        instance._stored = True
+
+        # If load only is just a name and not a list of names, turn it into a 1 element list
+        if isinstance(load_only, compat.base_type):
+            load_only = [load_only]
+        if isinstance(load_except, compat.base_type):
+            load_except = [load_except]
+
+        if load_data == pypetconstants.LOAD_SKELETON:
+            # We only load skeleton if asked for it and thus only
+            # signal completed node loading
+            self._node_processing_timer.signal_update()
+            return
+        elif load_only is not None:
+            if load_except is not None:
+                raise ValueError('Please use either `load_only` or `load_except` and not '
+                             'both at the same time.')
+            elif instance.v_is_parameter and instance.v_locked:
+                raise pex.ParameterLockedException('Parameter `%s` is locked, '
+                                                   'I will skip loading.' %
+                                                    instance.v_full_name)
+            self._logger.debug('I am in load only mode, I will only load %s.' %
+                               str(load_only))
+            load_only = set(load_only)
+        elif load_except is not None:
+            if instance.v_is_parameter and instance.v_locked:
+                raise pex.ParameterLockedException('Parameter `%s` is locked, '
+                                                   'I will skip loading.' %
+                                                    instance.v_full_name)
+            self._logger.debug('I am in load except mode, I will load everything except %s.' %
+                               str(load_except))
+            # We do not want to modify the original list
+            load_except = set(load_except)
+        elif not instance.f_is_empty():
+            # We only load data if the instance is empty or we specified load_only or
+            # load_except and thus only
+            # signal completed node loading
+            self._node_processing_timer.signal_update()
+            return
+
+        full_name = instance.v_full_name
+        self._logger.debug('Loading data of %s' % full_name)
+
+        load_dict = {}  # Dict that will be used to keep all data for loading the parameter or
+        # result
+
+        self._prm_load_into_dict(full_name=full_name,
+                                 load_dict=load_dict,
+                                 entry=_entry,
+                                 instance=instance,
+                                 load_only=load_only,
+                                 load_except=load_except)
+
+        if load_only is not None:
+            # Check if all data in `load_only` was actually found in the hdf5 file
+            if len(load_only) > 0:
+                self._logger.warning('You marked %s for load only, '
+                                     'but I cannot find these for `%s`' %
+                                     (str(load_only), full_name))
+        elif load_except is not None:
+            if len(load_except) > 0:
+                self._logger.warning(('You marked `%s` for not loading, but these were not part '
+                                      'of `%s` anyway.' % (str(load_except), full_name)))
+
+        # Finally tell the parameter or result to load the data, if there was any ;-)
+        if load_dict:
+            try:
+                instance._load(load_dict)
+                if instance.v_is_parameter:
+                    # Lock parameter as soon as data is loaded
+                    instance.f_lock()
+            except:
+                self._logger.error(
+                    'Error while reconstructing data of leaf `%s`.' % full_name)
+                raise
+
+        # Signal completed node loading
+        self._node_processing_timer.signal_update()
+
+    def _prm_load_into_dict(self, full_name, load_dict, entry, instance,
+                            load_only, load_except):
+        """Loads into dictionary"""
+        self._srvc_update_db()
+        for load_name in entry.get(self.DATA, []):
+
+            if load_only is not None:
+                if load_name not in load_only:
+                    continue
+                else:
+                    load_only.remove(load_name)
+
+            elif load_except is not None:
+                if load_name in load_except:
+                    load_except.remove(load_name)
+                    continue
+
+            full_load_name = full_name + '.' + load_name
+            to_load = self._arctic_lib.read(full_load_name)
+            load_dict[load_name] = to_load
+
+    def _trj_load_trajectory(self, traj, as_new, load_parameters, load_derived_parameters,
+                             load_results, load_other_data, recursive, max_depth,
+                             with_run_information, force):
+        """Loads a single trajectory from a given file.
+
+
+        :param traj: The trajectory
+
+        :param as_new: Whether to load trajectory as new
+
+        :param load_parameters: How to load parameters and config
+
+        :param load_derived_parameters: How to load derived parameters
+
+        :param load_results: How to load results
+
+        :param load_other_data: How to load anything not within the four subbranches
+
+        :param recursive: If data should be loaded recursively
+
+        :param max_depth: Maximum depth of loading
+
+        :param with_run_information:
+
+            If run information should be loaded
+
+        :param force: Force load in case there is a pypet version mismatch
+
+        You can specify how to load the parameters, derived parameters and results
+        as follows:
+
+        :const:`pypet.pypetconstants.LOAD_NOTHING`: (0)
+
+            Nothing is loaded
+
+        :const:`pypet.pypetconstants.LOAD_SKELETON`: (1)
+
+            The skeleton including annotations are loaded, i.e. the items are empty.
+            Non-empty items in RAM are left untouched.
+
+        :const:`pypet.pypetconstants.LOAD_DATA`: (2)
+
+            The whole data is loaded.
+            Only empty or in RAM non-existing instance are filled with the
+            data found on disk.
+
+        :const:`pypet.pypetconstants.OVERWRITE_DATA`: (3)
+
+            The whole data is loaded.
+            If items that are to be loaded are already in RAM and not empty,
+            they are emptied and new data is loaded from disk.
+
+
+        If `as_new=True` the old trajectory is loaded into the new one, only parameters can be
+        loaded. If `as_new=False` the current trajectory is completely replaced by the one
+        on disk, i.e. the name from disk, the timestamp, etc. are assigned to `traj`.
+
+        """
+        # Some validity checks, if `as_new` is used correctly
+        if (as_new and (load_derived_parameters != pypetconstants.LOAD_NOTHING or
+                                load_results != pypetconstants.LOAD_NOTHING or
+                                load_other_data != pypetconstants.LOAD_NOTHING)):
+            raise ValueError('You cannot load a trajectory as new and load the derived '
+                             'parameters and results. Only parameters are allowed.')
+
+        if as_new and load_parameters != pypetconstants.LOAD_DATA:
+            raise ValueError('You cannot load the trajectory as new and not load the data of '
+                             'the parameters.')
+
+        loadconstants = (pypetconstants.LOAD_NOTHING, pypetconstants.LOAD_SKELETON,
+                         pypetconstants.LOAD_DATA, pypetconstants.OVERWRITE_DATA)
+
+        if not (load_parameters in loadconstants and load_derived_parameters in loadconstants and
+                        load_results in loadconstants and load_other_data in loadconstants):
+            raise ValueError('Please give a valid option on how to load data. Options for '
+                             '`load_parameter`, `load_derived_parameters`, `load_results`, '
+                             'and `load_other_data` are %s. See function documentation for '
+                             'the semantics of the values.' % str(loadconstants))
+
+        traj._stored = not as_new
+
+        # Loads meta data like the name, timestamps etc.
+        # load_data is only used here to determine how to load the annotations
+        load_data = max(load_parameters, load_derived_parameters, load_results, load_other_data)
+        self._trj_load_meta_data(traj, load_data, as_new, with_run_information, force)
+
+        if (load_parameters != pypetconstants.LOAD_NOTHING or
+                load_derived_parameters != pypetconstants.LOAD_NOTHING or
+                load_results != pypetconstants.LOAD_NOTHING or
+                load_other_data != pypetconstants.LOAD_NOTHING):
+            self._logger.info('Loading trajectory `%s`.' % traj.v_name)
+        else:
+            self._logger.info('Checked meta data of trajectory `%s`.' % traj.v_name)
+            return
+
+        maximum_display_other = 10
+        counter = 0
+
+        for children in [self._trajectory_group._v_groups, self._trajectory_group._v_links]:
+            for hdf5_group_name in children:
+                hdf5_group = children[hdf5_group_name]
+                child_name = hdf5_group._v_name
+
+                load_subbranch = True
+                if child_name == 'config':
+                    if as_new:
+                        loading = pypetconstants.LOAD_NOTHING
+                    else:
+                        # If the trajectory is loaded as new, we don't care about old config stuff
+                        # and only load the parameters
+                        loading = load_parameters
+                elif child_name == 'parameters':
+                    loading = load_parameters
+                elif child_name == 'results':
+                    loading = load_results
+                elif child_name == 'derived_parameters':
+                    loading = load_derived_parameters
+                elif child_name == 'overview':
+                    continue
+                else:
+                    loading = load_other_data
+                    load_subbranch = False
+
+                if loading == pypetconstants.LOAD_NOTHING:
+                    continue
+
+                if load_subbranch:
+                    # Load the subbranches recursively
+                    self._logger.info('Loading branch `%s` in mode `%s`.' %
+                                          (child_name, str(loading)))
+                else:
+                    if counter < maximum_display_other:
+                        self._logger.info(
+                            'Loading branch/node `%s` in mode `%s`.' % (child_name, str(loading)))
+                    elif counter == maximum_display_other:
+                        self._logger.info('To many branchs or nodes at root for display. '
+                                          'I will not inform you about loading anymore. '
+                                          'Branches are loaded silently '
+                                          'in the background. Do not worry, '
+                                          'I will not freeze! Pinky promise!!!')
+                    counter += 1
+
+                self._tree_load_sub_branch(traj, child_name, load_data=loading, with_links=True,
+                                     recursive=recursive,
+                                     max_depth=max_depth,
+                                     _trajectory=traj, _as_new=as_new)
+
+    def _trj_load_meta_data(self, traj, load_data, as_new, with_run_information, force):
+        """Loads meta information about the trajectory
+
+        Checks if the version number does not differ from current pypet version
+        Loads, comment, timestamp, name, version from disk in case trajectory is not loaded
+        as new. Updates the run information as well.
+
+        """
+        info_entry = self._info_coll.find_one[{'_id': self.INFO}]
+
+        try:
+            version = compat.tostr(info_entry['version'])
+        except (IndexError, ValueError) as ke:
+            self._logger.error('Could not check version due to: %s' % str(ke))
+            version = '`COULD NOT BE LOADED`'
+
+        try:
+            python = compat.tostr(info_entry['python'])
+        except (IndexError, ValueError) as ke:
+            self._logger.error('Could not check version due to: %s' % str(ke))
+            python = '`COULD NOT BE LOADED`'
+
+        self._trj_check_version(version, python, force)
+
+        # Load the skeleton information
+        self._grp_load_group(traj, load_data=load_data,
+                             with_links=False, recursive=False, _traj=traj,
+                             _as_new=as_new)
+
+        if as_new:
+            length = int(info_entry['length'])
+            for irun in range(length):
+                traj._add_run_info(irun)
+        else:
+            traj._comment = compat.tostr(info_entry['comment'])
+            traj._timestamp = float(info_entry['timestamp'])
+            traj._trajectory_timestamp = traj._timestamp
+            traj._time = compat.tostr(info_entry['time'])
+            traj._trajectory_time = traj._time
+            traj._name = compat.tostr(info_entry['name'])
+            traj._traj_name = traj._name
+            traj._version = version
+            traj._python = python
+
+            if with_run_information:
+                for entry in self._run_coll.find():
+                    name = compat.tostr(entry['name'])
+                    idx = int(entry['idx'])
+                    timestamp = float(entry['timestamp'])
+                    time_ = compat.tostr(entry['time'])
+                    completed = int(entry['completed'])
+                    summary = compat.tostr(entry['parameter_summary'])
+                    hexsha = compat.tostr(entry['short_environment_hexsha'])
+
+                    runtime = compat.tostr(entry['runtime'])
+                    finish_timestamp = float(entry['finish_timestamp'])
+
+                    info_dict = {'idx': idx,
+                                 'timestamp': timestamp,
+                                 'finish_timestamp': finish_timestamp,
+                                 'runtime': runtime,
+                                 'time': time_,
+                                 'completed': completed,
+                                 'name': name,
+                                 'parameter_summary': summary,
+                                 'short_environment_hexsha': hexsha}
+
+                    traj._add_run_info(**info_dict)
+            else:
+                traj._length = self._run_coll.count()
+
+        # Load explorations
+        self._trj_load_exploration(traj)
+
+    def _trj_check_version(self, version, python, force):
+        """Checks for version mismatch
+
+        Raises a VersionMismatchError if version of loaded trajectory and current pypet version
+        do not match. In case of `force=True` error is not raised only a warning is emitted.
+
+        """
+        curr_python = compat.python_version_string
+
+        if (version != VERSION or curr_python != python) and not force:
+            raise pex.VersionMismatchError('Current pypet version is %s used under python %s '
+                                           '  but your trajectory'
+                                           ' was created with version %s and python %s.'
+                                           ' Use >>force=True<< to perform your load regardless'
+                                           ' of version mismatch.' %
+                                           (VERSION, curr_python, version, python))
+        elif version != VERSION or curr_python != python:
+            self._logger.warning('Current pypet version is %s with python %s but your trajectory'
+                                 ' was created with version %s under python %s.'
+                                 ' Yet, you enforced the load, so I will'
+                                 ' handle the trajectory despite the'
+                                 ' version mismatch.' %
+                                 (VERSION, curr_python, version, python))

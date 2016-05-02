@@ -1,6 +1,9 @@
 pypet 0.4.0
 
-*   MongoDB
+*   MongoDB support
+
+*   Annotations are no longer updated, they are stored once and never changed afterwards,
+    unless explicetly overwritten by the user.
 
 
 pypet 0.3.0

@@ -14,6 +14,10 @@ from pypet.utils.helpful_functions import get_matching_kwargs
 from pypet.storageservice import HDF5StorageService
 from pypet.utils.dynamicimports import create_class
 import pypet.compat as compat
+try:
+    from pypet.backends.mongodb import MongoStorageService
+except ImportError:
+    MongoStorageService = None
 
 
 def _create_storage(storage_service, trajectory=None, **kwargs):
@@ -55,9 +59,17 @@ def storage_factory(storage_service, trajectory=None, **kwargs):
         else:
             raise ValueError('Extension `%s` of filename `%s` not understood.' %
                              (ext, filename))
+    if storage_service is None and ('mongo_db' in kwargs or
+                                    'mongo_host' in kwargs or
+                                    'mongo_port' in kwargs):
+        storage_service = MongoStorageService
+
     elif isinstance(storage_service, compat.base_type):
         class_name = storage_service.split('.')[-1]
-        storage_service = create_class(class_name, [storage_service, HDF5StorageService])
+        class_list = [storage_service, HDF5StorageService]
+        if MongoStorageService is not None:
+            class_list.append(MongoStorageService)
+        storage_service = create_class(class_name, class_list)
 
     if inspect.isclass(storage_service):
         return _create_storage(storage_service, trajectory, **kwargs)

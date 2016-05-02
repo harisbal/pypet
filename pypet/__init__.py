@@ -87,3 +87,9 @@ __all__ = [
     manual_run.__name__,
     test.__name__
 ]
+
+try:
+    from pypet.backends.mongodb import MongoStorageService
+    __all__.append(MongoStorageService.__name__)
+except ImportError:
+    pass
