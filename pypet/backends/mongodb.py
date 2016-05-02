@@ -1,4 +1,5 @@
 import pymongo
+import itertools as itools
 import arctic
 import arctic.exceptions as aexc
 try:
@@ -31,7 +32,7 @@ DATA_COLL = 'data'
 
 
 class MongoStorageService(StorageService, HasLogger):
-    def __init__(self, mongo_host='localhost', mongo_port=27017):
+    def __init__(self, mongo_host='localhost', mongo_port=27017, max_bulk_length=500, protocol=2):
         self._set_logger()
         if isinstance(mongo_host, compat.base_type):
             self._mongo_host = mongo_host
@@ -41,7 +42,9 @@ class MongoStorageService(StorageService, HasLogger):
             self._client = mongo_host
             self._mongo_host = None
             self._mongo_port = None
+        self._protocol = protocol
         self._arctic = arctic.Arctic(self._client)
+        self._max_bulk_length = max_bulk_length
         self._info_coll = None
         self._tree_coll = None
         self._run_coll = None
@@ -64,10 +67,14 @@ class MongoStorageService(StorageService, HasLogger):
     ''' Whether an hdf5 node is a leaf node'''
     ANNOTATIONS = 'annotations'
     '''Annotations entry'''
-    GROUPS_AND_LEAVES = 'groups_leaves'
+    GROUPS = 'groups'
     '''Children entry'''
     LINKS = 'links'
     '''Links entry'''
+    LEAVES = 'leaves'
+    '''Leaves entry'''
+    DATA = 'data'
+    '''data entry'''
 
     @property
     def is_open(self):
@@ -654,6 +661,39 @@ class MongoStorageService(StorageService, HasLogger):
                               self._traj_name)
         traj._stored = True
 
+    def _trj_fill_run_table(self, traj, start, stop):
+        """Fills the `run` overview table with information.
+
+        Will also update new information.
+
+        """
+
+        runtable = getattr(self._overview_group, 'runs')
+
+        rows = []
+        updated_run_information = traj._updated_run_information
+        for idx in compat.xrange(start, stop):
+            info_dict = traj._run_information[traj._single_run_ids[idx]]
+            rows.append(pymongo.InsertOne(dict(_id = info_dict['idx']).update(info_dict)))
+            updated_run_information.discard(idx)
+
+        if rows:
+            self._run_coll.bulk_write(rows)
+
+        # Store all runs that are updated and that have not been stored yet
+        rows = []
+        indices = []
+        for idx in updated_run_information:
+            info_dict = traj.f_get_run_information(idx, copy=False)
+            rows.append(pymongo.UpdateOne({'_id': info_dict['idx']},
+                                    {'$set': dict(_id=info_dict['idx']).update(info_dict)}))
+            indices.append(idx)
+
+        if rows:
+            self._run_coll.bulk_write(rows)
+
+        traj._updated_run_information = set()
+
     def _srvc_opening_routine(self, mode, msg=None, kwargs=()):
         """Opens an hdf5 file for reading or writing
 
@@ -770,6 +810,7 @@ class MongoStorageService(StorageService, HasLogger):
         and closing of the file if `store` or `load` are called recursively.
 
         """
+        self._srvc_flush_tree_db()
         self._client.close()
         self._info_coll = None
         self._tree_coll = None
@@ -781,9 +822,16 @@ class MongoStorageService(StorageService, HasLogger):
         self._traj_stump = None
         self._is_open = False
 
-    @staticmethod
-    def _srvc_set_on_insert(coll, entry, how='$setOnInsert'):
-        coll.update_one({'_id': entry['_id_']}, {how:  entry}, upsert=True)
+    def _srvc_flush_tree_db(self):
+        if self._bulk:
+            self._tree_coll.bulk_write(self._bulk)
+            self._bulk = []
+
+    def _srvc_update_db(self, entry, _id, how='$setOnInsert', upsert=True):
+        u = pymongo.UpdateOne({'_id': _id}, {how: entry}, upsert=upsert)
+        self._bulk.append(u)
+        if len(self._bulk) > self._max_bulk_length:
+            self._srvc_flush_tree_db()
 
     def _trj_store_meta_data(self, traj):
         """ Stores general information about the trajectory in the hdf5file.
@@ -808,21 +856,9 @@ class MongoStorageService(StorageService, HasLogger):
         # 'loaded_from' : pt.StringCol(pypetconstants.HDF5_STRCOL_MAX_LOCATION_LENGTH)}
         self._info_coll.update_one({'_id': 'info'}, {'$set': descriptiondict}, upsert=True)
 
-        # # Description of the `run` table
-        # rundescription_dict = {'name': pt.StringCol(pypetconstants.HDF5_STRCOL_MAX_NAME_LENGTH,
-        #                                             pos=1),
-        #                        'time': pt.StringCol(len(traj.v_time), pos=2),
-        #                        'timestamp': pt.FloatCol(pos=3),
-        #                        'idx': pt.IntCol(pos=0),
-        #                        'completed': pt.IntCol(pos=8),
-        #                        'parameter_summary': pt.StringCol(
-        #                            pypetconstants.HDF5_STRCOL_MAX_COMMENT_LENGTH,
-        #                            pos=6),
-        #                        'short_environment_hexsha': pt.StringCol(7, pos=7),
-        #                        'finish_timestamp': pt.FloatCol(pos=4),
-        #                        'runtime': pt.StringCol(
-        #                            pypetconstants.HDF5_STRCOL_MAX_RUNTIME_LENGTH,
-        #                            pos=5)}
+        # Fill table with dummy entries starting from the current table size
+        actual_rows = self._run_coll.coun()
+        self._trj_fill_run_table(traj, actual_rows, len(traj._run_information))
 
         # Store the list of explored paramters
         self._trj_store_explorations(traj)
@@ -846,8 +882,8 @@ class MongoStorageService(StorageService, HasLogger):
                     if len(explored_list) != nexplored:
                         self._info_coll.delete_one({'_id': 'explorations'})
             explored_list = compat.listkeys(traj._explored_parameters)
-            self._srvc_set_on_insert(self._info_coll, {'_id': 'explorations',
-                                                       'explorations': explored_list})
+            self._info_coll.update_one( {'_id': 'explorations'},  {'$set': {'_id': 'explorations',
+                                                       'explorations': explored_list}})
 
     def _tree_store_sub_branch(self, traj_node, branch_name,
                                store_data=pypetconstants.STORE_DATA,
@@ -938,7 +974,8 @@ class MongoStorageService(StorageService, HasLogger):
                                max_depth=max_depth, current_depth=current_depth)
 
     def _grp_store_group(self, traj_group, store_data=pypetconstants.STORE_DATA,
-                         with_links=True, recursive=False, max_depth=None):
+                         with_links=True, recursive=False, max_depth=None,
+                         parent_name = None):
         """Stores a group node.
 
         For group nodes only annotations and comments need to be stored.
@@ -958,31 +995,26 @@ class MongoStorageService(StorageService, HasLogger):
             else:
                 option = '$setOnInsert'
 
-            data = {'_id': traj_group.v_full_name,
-                    self.CLASS_NAME: traj_group.f_get_class_name()}
+            data = {'_id': traj_group.v_full_name}
+
+            if type(traj_group) not in (nn.NNGroupNode, nn.ConfigGroup, nn.ParameterGroup,
+                                             nn.DerivedParameterGroup, nn.ResultGroup):
+                data[self.CLASS_NAME] = traj_group.f_get_class_name()
 
             if traj_group.v_comment != '':
-                option = '$set'
                 data[self.COMMENT] = traj_group.v_comment
 
-            if not traj_group.v_annotations.f_is_empty():
-                option = '$set'
-                annotations = traj_group.v_annotations.f_to_dict()
-                entry = self._tree_coll.find_one({'_id': traj_group.v_full_name})
-                if entry is None:
-                    data[self.ANNOTATIONS] = annotations
-                else:
-                    if self.ANNOTATIONS in entry:
-                        old_annotations = entry[self.ANNOTATIONS]
-                    else:
-                        old_annotations = {}
-                    for key in annotations:
-                        if key not in old_annotations:
-                            old_annotations[key] = annotations[key]
-                    data[self.ANNOTATIONS] = old_annotations
+            data = self._ann_store_annotations(traj_group, data)
 
-            self._srvc_set_on_insert(data, how=option)
+            self._srvc_update_db(data, _id=traj_group.v_full_name, how=option)
             traj_group._stored = True
+
+            if parent_name is None:
+                parent_name = traj_group.v_location
+
+            self._srvc_update_db(entry={self.GROUPS: traj_group.v_name},
+                                         _id= parent_name,
+                                         how='$addToSet')
 
             # Signal completed node loading
             self._node_processing_timer.signal_update()
@@ -993,6 +1025,15 @@ class MongoStorageService(StorageService, HasLogger):
             self._tree_store_nodes_dfs(parent_traj_group, traj_group.v_name, store_data=store_data,
                                        with_links=with_links, recursive=recursive,
                                        max_depth=max_depth, current_depth=0)
+
+    def _ann_store_annotations(self, traj_node, data):
+        """Stores annotations into data."""
+
+        if not traj_node.v_annotations.f_is_empty():
+            data[self.ANNOTATIONS] = pickle.dumps(traj_node.v_annotations.f_to_dict(),
+                                                  protocol=self._protocl)
+
+        return data
 
     def _tree_store_nodes_dfs(self, parent_traj_node, name, store_data, with_links, recursive,
                           max_depth, current_depth):
@@ -1019,20 +1060,387 @@ class MongoStorageService(StorageService, HasLogger):
             if name in parent_traj_node._links:
                 if with_links:
                     self._tree_store_link(parent_traj_node, name)
-                    self._tree_coll.update_one({'_id': parent_traj_node.v_fullname},
-                                               {'addToSet'}) #TODO HERE!!!
                 continue
 
             traj_node = parent_traj_node._children[name]
 
             if traj_node.v_is_leaf:
-                self._prm_store_parameter_or_result(traj_node, store_data=store_data)
+                self._prm_store_parameter_or_result(traj_node, store_data=store_data,
+                                                    parent_name=parent_traj_node.v_full_name)
 
             else:
                 self._grp_store_group(traj_node, store_data=store_data, with_links=with_links,
-                                      recursive=False, max_depth=max_depth)
+                                      recursive=False, max_depth=max_depth,
+                                      parent_name=parent_traj_node.v_full_name)
 
                 if recursive and current_depth < max_depth:
                     for child in compat.iterkeys(traj_node._children):
                         store_list.append((traj_node, child, current_depth + 1))
 
+    def _tree_store_link(self, node_in_traj, link):
+        """Creates a soft link.
+
+        :param node_in_traj: parental node
+        :param store_data: how to store data
+        :param link: name of link
+        """
+
+        self._srvc_flush_tree_db()
+        linked_traj_node = node_in_traj._links[link]
+        linking_name = linked_traj_node.v_full_name
+        entry = self._tree_coll.find_one({'_id' : linking_name})
+        if entry is None:
+            self._logger.debug('Could not store link `%s` under `%s` immediately, '
+                               'need to store `%s` first. '
+                               'Will store the link right after.' % (link,
+                                                                     node_in_traj.v_full_name,
+                                                                     linked_traj_node.v_full_name))
+            root = node_in_traj._nn_interface._root_instance
+            self._tree_store_sub_branch(root, linked_traj_node.v_full_name,
+                                        store_data=pypetconstants.STORE_DATA_SKIPPING,
+                                        with_links=False, recursive=False)
+        self._srvc_update_db(entry={self.LINKS: linked_traj_node.v_full_name},
+                                         _id= node_in_traj.v_full_name,
+                                         how='$addToSet')
+
+    def _prm_store_parameter_or_result(self,
+                                       instance,
+                                       store_data=pypetconstants.STORE_DATA,
+                                       store_flags=None,
+                                       overwrite=None,
+                                       with_links=False,
+                                       recursive=False,
+                                       parent_name=None
+                                       **kwargs):
+        """Stores a parameter or result to hdf5.
+
+        :param instance:
+
+            The instance to be stored
+
+        :param store_data:
+
+            How to store data
+
+        :param store_flags:
+
+            Dictionary containing how to store individual data, usually empty.
+
+        :param overwrite:
+
+            Instructions how to overwrite data
+
+        :param with_links:
+
+            Placeholder because leaves have no links
+
+        :param recursive:
+
+            Placeholder, because leaves have no children
+
+        """
+        if store_data == pypetconstants.STORE_NOTHING:
+            return
+        elif store_data == pypetconstants.STORE_DATA_SKIPPING and instance._stored:
+            self._logger.debug('Already found `%s` on disk I will not store it!' %
+                                   instance.v_full_name)
+            return
+        elif store_data == pypetconstants.OVERWRITE_DATA:
+            if not overwrite:
+                overwrite = True
+
+        fullname = instance.v_full_name
+        self._logger.debug('Storing `%s`.' % fullname)
+
+        # kwargs_flags = {} # Dictionary to change settings
+        # old_kwargs = {}
+        store_dict = {}
+
+        try:
+            # Get the data to store from the instance
+            if not instance.f_is_empty():
+                store_dict = instance._store()
+
+            if overwrite:
+                entry = self._tree_coll.find_one({'_id': instance.v_full_name})
+                if isinstance(overwrite, compat.base_type):
+                    overwrite = [overwrite]
+
+                if overwrite is True and entry is not None:
+                    to_delete = [instance.v_full_name + '.' + x for x in entry[self.DATA]]
+                    self._all_delete_parameter_or_result_or_group(instance,
+                                                                  delete_only=to_delete)
+
+                elif isinstance(overwrite, (list, tuple)):
+                    overwrite_set = set(overwrite)
+                    key_set = set(store_dict.keys())
+
+                    stuff_not_to_be_overwritten = overwrite_set - key_set
+
+                    if overwrite != 'v_annotations' and len(stuff_not_to_be_overwritten) > 0:
+                        self._logger.warning('Cannot overwrite `%s`, these items are not supposed to '
+                                             'be stored by the leaf node.' %
+                                             str(stuff_not_to_be_overwritten))
+
+                    stuff_to_overwrite = overwrite_set & key_set
+                    if len(stuff_to_overwrite) > 0:
+                        self._all_delete_parameter_or_result_or_group(instance,
+                                                                      delete_only=list(
+                                                                          stuff_to_overwrite))
+                else:
+                    raise ValueError('Your value of overwrite `%s` is not understood. '
+                                     'Please pass `True` of a list of strings to fine grain '
+                                     'overwriting.' % str(overwrite))
+
+            self._prm_store_from_dict(fullname, store_dict)
+
+            # Store meta information and annotations
+            if overwrite:
+                option = '$set'
+            else:
+                option = '$setOnInsert'
+
+            data = {'_id': instance.v_full_name,
+                    self.CLASS_NAME: instance.f_get_class_name(),
+                    self.LEAF: True}
+
+            if instance.v_comment != '':
+                data[self.COMMENT] = instance.v_comment
+
+            if overwrite != 'v_annotations':
+
+                data = self._ann_store_annotations(instance, data)
+
+            self._srvc_update_db(data, _id=instance.v_full_name, how=option)
+
+            if overwrite == 'v_annotations':
+                data = self._ann_store_annotations(instance, {})
+                self._srvc_update_db(data, _id=instance.v_full_name, how='$set')
+
+            instance._stored = True
+
+            if parent_name is None:
+                parent_name = instance.v_location
+            self._srvc_update_db(entry={self.LEAVES: instance.v_name},
+                                         _id= parent_name,
+                                         how='$addToSet')
+
+            #self._logger.debug('Finished Storing `%s`.' % fullname)
+            # Signal completed node loading
+            self._node_processing_timer.signal_update()
+
+        except:
+            # I anything fails, we want to remove the data of the parameter again
+            self._logger.error(
+                'Failed storing leaf `%s`. I will remove the data I added  again.' % fullname)
+            # Delete data
+            self._all_delete_parameter_or_result_or_group(instance)
+            raise
+
+    def _prm_store_from_dict(self, fullname, store_dict):
+        """Stores a `store_dict`"""
+        for key in store_dict:
+            self._srvc_update_db({self.DATA: key}, _id = fullname, how='$addToSet')
+        self._srvc_flush_tree_db()
+        for key, data_to_store in store_dict.items():
+            name = fullname + '.' + key
+            self._arctic_lib.write(name, data_to_store)
+
+
+    def _all_delete_parameter_or_result_or_group(self, instance,
+                                                 delete_only=None,
+                                                 remove_from_item=False,
+                                                 recursive=False,
+                                                 entry=None):
+        """Removes a parameter or result or group from the hdf5 file.
+
+        :param instance: Instance to be removed
+
+        :param delete_only:
+
+            List of elements if you only want to delete parts of a leaf node. Note that this
+            needs to list the names of the hdf5 subnodes. BE CAREFUL if you erase parts of a leaf.
+            Erasing partly happens at your own risk, it might be the case that you can
+            no longer reconstruct the leaf from the leftovers!
+
+        :param remove_from_item:
+
+            If using `delete_only` and `remove_from_item=True` after deletion the data item is
+            also removed from the `instance`.
+
+
+        """
+        split_name = instance.v_location.split('.')
+        if entry is None:
+            entry = self._tree_coll.find_one({'_id': instance.v_full_name})
+        if entry is None:
+            self._logger.warning('Could not delete `%s. Entry not found!' % instance.v_full_name)
+            return
+
+        self._srvc_flush_tree_db()
+
+
+        if delete_only is None:
+            if instance.v_is_group and not recursive and (len(entry[self.GROUPS]) +
+                    len(entry[self.LEAVES]) + len(entry[self.LINKS]) != 0):
+                    raise TypeError('You cannot remove the group `%s`, it has children, please '
+                                    'use `recursive=True` to enforce removal.' %
+                                    instance.v_full_name)
+            if instance.v_is_leaf:
+                for elem in entry.get(self.DATA, []):
+                    self._arctic_lib.delete(instance.v_full_name + '.' + elem)
+                self._tree_coll.update_one({'_id': instance.v_location},
+                                       {'$pull': {self.LEAVES: instance.v_name}})
+            else:
+                self._tree_coll.update_one({'_id': instance.v_location},
+                                       {'$pull': {self.GROUPS: instance.v_name}})
+            self._tree_coll.delete_one({'_id': instance.v_full_name})
+
+        else:
+            if not instance.v_is_leaf:
+                raise ValueError('You can only choose `delete_only` mode for leafs.')
+
+            if isinstance(delete_only, compat.base_type):
+                delete_only = [delete_only]
+
+            for delete_item in delete_only:
+                if (remove_from_item and
+                        hasattr(instance, '__contains__') and
+                        hasattr(instance, '__delattr__') and
+                            delete_item in instance):
+                    delattr(instance, delete_item)
+
+                deletion = self._arctic_lib.delete(instance.v_full_name + '.' + delete_item)
+                self._tree_coll.update_one({'_id': instance.v_full_name}, {'$pull': {self.DATA:
+                                                                                delete_item}})
+                if deletion.deleted_count == 0:
+                    self._logger.warning('Could not delete `%s` from `%s`. Entry not found!' %
+                                         (delete_item, instance.v_full_name))
+
+    def _srn_store_single_run(self, traj,
+                              recursive=True,
+                              store_data=pypetconstants.STORE_DATA,
+                              max_depth=None):
+        """ Stores a single run instance to disk (only meta data)"""
+
+        if store_data != pypetconstants.STORE_NOTHING:
+            self._logger.debug('Storing Data of single run `%s`.' % traj.v_crun)
+            if max_depth is None:
+                max_depth = float('inf')
+            for name_pair in traj._new_nodes:
+                _, name = name_pair
+                parent_group, child_node = traj._new_nodes[name_pair]
+                if not child_node._stored:
+                    self._tree_store_sub_branch(parent_group, name,
+                                          store_data=store_data,
+                                          with_links=True,
+                                          recursive=recursive,
+                                          max_depth=max_depth - child_node.v_depth)
+            for name_pair in traj._new_links:
+                _, link = name_pair
+                parent_group, _ = traj._new_links[name_pair]
+                self._tree_store_sub_branch(parent_group, link,
+                                            store_data=store_data,
+                                            with_links=True,
+                                            recursive=recursive,
+                                            max_depth=max_depth - parent_group.v_depth - 1)
+
+
+    def _tree_load_nodes_dfs(self, parent_traj_node, load_data, with_links, recursive,
+                             max_depth, current_depth, trajectory, as_new, entry):
+        """Loads a node from hdf5 file and if desired recursively everything below
+
+        :param parent_traj_node: The parent node whose child should be loaded
+        :param load_data: How to load the data
+        :param with_links: If links should be loaded
+        :param recursive: Whether loading recursively below entry
+        :param max_depth: Maximum depth
+        :param current_depth: Current depth
+        :param trajectory: The trajectory object
+        :param as_new: If trajectory is loaded as new
+        :param entry: The db entry containing the child to be loaded
+
+        """
+        if max_depth is None:
+            max_depth = float('inf')
+
+        loading_list = [(parent_traj_node, current_depth, entry)]
+
+        while loading_list:
+            parent_traj_node, current_depth, entry = loading_list.pop()
+
+            full_name = entry['_id']
+            name = full_name.split('.')[-1]
+            if name in parent_traj_node._links:
+                if with_links:
+                    # We end up here when auto-loading a soft link
+                    self._tree_load_link(parent_traj_node, load_data=load_data, traj=trajectory,
+                                         as_new=as_new, hdf5_soft_link=entry)
+                continue
+
+            is_leaf = self.LEAF in entry
+            in_trajectory = name in parent_traj_node._children
+
+            if is_leaf:
+                # In case we have a leaf node, we need to check if we have to create a new
+                # parameter or result
+
+                if in_trajectory:
+                    instance = parent_traj_node._children[name]
+                # Otherwise we need to create a new instance
+                else:
+                    instance = self._tree_create_leaf(name, trajectory, entry)
+
+                    # Add the instance to the trajectory tree
+                    parent_traj_node._add_leaf_from_storage(args=(instance,), kwargs={})
+
+                self._prm_load_parameter_or_result(instance, load_data=load_data)
+                if as_new:
+                    instance._stored = False
+
+            else:
+                if in_trajectory:
+                    traj_group = parent_traj_node._children[name]
+
+                    if load_data == pypetconstants.OVERWRITE_DATA:
+                        traj_group.v_annotations.f_empty()
+                        traj_group.v_comment = ''
+                else:
+                    if self.CLASS_NAME in entry:
+                        class_name = entry[self.CLASS_NAME]
+                        class_constructor = trajectory._create_class(class_name)
+                        instance = trajectory._construct_instance(class_constructor, name)
+                        args = (instance,)
+                    else:
+                        args = (name,)
+                    # If the group does not exist create it'
+                    traj_group = parent_traj_node._add_group_from_storage(args=args, kwargs={})
+
+                # Load annotations and comment
+                self._grp_load_group(traj_group, load_data=load_data, with_links=with_links,
+                                     recursive=False, max_depth=max_depth,
+                                     _traj=trajectory, _as_new=as_new,
+                                     _entry=entry)
+
+                if recursive and current_depth < max_depth:
+                    new_depth = current_depth + 1
+                    for what in (self.GROUPS, self.LEAVES):
+                        for child in entry.get(what, []):
+                            new_entry = self._tree_coll.find_one({'_id':
+                                                        traj_group.v_full_name + '.' + child})
+                            if new_entry is None:
+                                self._logger.warning('Did not find `%s`! '
+                                                     'Will remove it.' % child)
+                                self._tree_coll.update_one({'_id': traj_group.v_full_name},
+                                           {'$pull': {what: child}})
+                            else:
+                                loading_list.append((traj_group, new_depth, new_entry))
+                    for full_child_name in entry.get(self.LINKS, []):
+                        new_entry = self._tree_coll.find_one({'_id': full_child_name})
+                        if new_entry is None:
+                            self._logger.warning('Did not find `%s`! '
+                                                 'Will remove link' % full_child_name)
+                            self._tree_coll.update_one({'_id': traj_group.v_full_name},
+                                       {'$pull': {self.LINKS: full_child_name}})
+                        else:
+                            loading_list.append((traj_group, new_depth, new_entry))

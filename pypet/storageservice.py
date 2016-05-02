@@ -2310,7 +2310,6 @@ class HDF5StorageService(StorageService, HasLogger):
                                     flags=(HDF5StorageService.ADD_ROW,
                                            HDF5StorageService.MODIFY_ROW))
 
-
         # Fill table with dummy entries starting from the current table size
         actual_rows = runtable.nrows
         self._trj_fill_run_table(traj, actual_rows, len(traj._run_information))
@@ -2727,8 +2726,8 @@ class HDF5StorageService(StorageService, HasLogger):
                                      _hdf5_group=hdf5_group)
 
                 if recursive and current_depth < max_depth:
+                    new_depth = current_depth + 1
                     for children in (hdf5_group._v_groups, hdf5_group._v_links):
-                        new_depth = current_depth + 1
                         for new_hdf5_group_name in children:
                             new_hdf5_group = children[new_hdf5_group_name]
                             loading_list.append((traj_group, new_depth, new_hdf5_group))
@@ -3532,23 +3531,15 @@ class HDF5StorageService(StorageService, HasLogger):
         if not item_with_annotations.v_annotations.f_is_empty():
 
             anno_dict = item_with_annotations.v_annotations._dict
-
             current_attrs = node._v_attrs
-
-            changed = False
 
             for field_name in anno_dict:
                 val = anno_dict[field_name]
-
                 field_name_with_prefix = HDF5StorageService.ANNOTATION_PREFIX + field_name
-                if field_name_with_prefix not in current_attrs:
-                    # Only store *new* annotations, if they already exist on disk, skip storage
-                    setattr(current_attrs, field_name_with_prefix, val)
-                    changed = True
+                setattr(current_attrs, field_name_with_prefix, val)
 
-            if changed:
-                setattr(current_attrs, HDF5StorageService.ANNOTATED, True)
-                self._hdf5file.flush()
+            setattr(current_attrs, HDF5StorageService.ANNOTATED, True)
+            self._hdf5file.flush()
 
     def _ann_load_annotations(self, item_with_annotations, node):
         """Loads annotations from disk."""
@@ -3588,17 +3579,14 @@ class HDF5StorageService(StorageService, HasLogger):
         if store_data == pypetconstants.STORE_NOTHING:
             return
         elif store_data == pypetconstants.STORE_DATA_SKIPPING and traj_group._stored:
-            self._logger.debug('Already found `%s` on disk I will not store it!' %
+            self._logger.debug('Already found `%s` on disk I will not store it or any stuff '
+                               'below it in the tree!' %
                                    traj_group.v_full_name)
         elif not recursive:
             if _hdf5_group is None:
                 _hdf5_group, _newly_created = self._all_create_or_get_groups(traj_group.v_full_name)
 
             overwrite = store_data == pypetconstants.OVERWRITE_DATA
-
-            if (traj_group.v_comment != '' and
-                    (HDF5StorageService.COMMENT not in _hdf5_group._v_attrs or overwrite)):
-                setattr(_hdf5_group._v_attrs, HDF5StorageService.COMMENT, traj_group.v_comment)
 
             if ((_newly_created or overwrite) and
                 type(traj_group) not in (nn.NNGroupNode, nn.ConfigGroup, nn.ParameterGroup,
@@ -3608,14 +3596,17 @@ class HDF5StorageService(StorageService, HasLogger):
                 setattr(_hdf5_group._v_attrs, HDF5StorageService.CLASS_NAME,
                         traj_group.f_get_class_name())
 
-            self._ann_store_annotations(traj_group, _hdf5_group, overwrite=overwrite)
+            if (_newly_created or overwrite):
+                if (traj_group.v_comment != ''):
+                    setattr(_hdf5_group._v_attrs, HDF5StorageService.COMMENT, traj_group.v_comment)
+                self._ann_store_annotations(traj_group, _hdf5_group, overwrite=overwrite)
             self._hdf5file.flush()
             traj_group._stored = True
 
             # Signal completed node loading
             self._node_processing_timer.signal_update()
 
-        if recursive:
+        else:
             parent_traj_group = traj_group.f_get_parent()
             parent_hdf5_group = self._all_create_or_get_groups(parent_traj_group.v_full_name)[0]
 
@@ -4002,14 +3993,15 @@ class HDF5StorageService(StorageService, HasLogger):
 
             self._prm_store_from_dict(fullname, store_dict, _hdf5_group, store_flags, kwargs)
 
-            # Store annotations
-            self._ann_store_annotations(instance, _hdf5_group, overwrite=overwrite)
+            if _newly_created or overwrite:
+                if _newly_created or overwrite is True:
+                    # If we created a new group or the parameter was extended we need to
+                    # update the meta information and summary tables
+                    self._prm_add_meta_info(instance, _hdf5_group,
+                                            overwrite=not _newly_created)
 
-            if _newly_created or overwrite is True:
-                # If we created a new group or the parameter was extended we need to
-                # update the meta information and summary tables
-                self._prm_add_meta_info(instance, _hdf5_group,
-                                        overwrite=not _newly_created)
+                    # Store annotations
+                self._ann_store_annotations(instance, _hdf5_group, overwrite=overwrite)
 
             instance._stored = True
 
