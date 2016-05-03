@@ -89,6 +89,8 @@ class MongoStorageService(StorageService, HasLogger):
     '''Children entry'''
     LINKS = 'links'
     '''Links entry'''
+    LINK = 'link'
+    '''If elem is link'''
     LEAVES = 'leaves'
     '''Leaves entry'''
     DATA = 'data'
@@ -826,6 +828,11 @@ class MongoStorageService(StorageService, HasLogger):
 
         if 'trajectory_index' in kwargs:
             self._traj_index = kwargs.pop('trajectory_index')
+            if self._traj_index is not None:
+                all_dbs = self._client.database_names()
+                all_trajs = [x.endswith(TREE_COLL) for x in all_dbs]
+                self._traj_stump = sorted(all_trajs)[self._traj_index].split('_'+TREE_COLL)[0]
+                self._traj_name = self._traj_stump + '...'
 
     def _srvc_closing_routine(self):
         """Routine to close an hdf5 file
@@ -891,11 +898,12 @@ class MongoStorageService(StorageService, HasLogger):
     def _trj_load_exploration(self, traj):
         """Recalls names of all explored parameters"""
         explorations_entry = self._info_coll.find_one({'_id': self.EXPLORATIONS})
-        explorations_list = explorations_entry[self.EXPLORATIONS]
-        for param_name in explorations_list:
-            param_name = compat.tostr(param_name)
-            if param_name not in traj._explored_parameters:
-                traj._explored_parameters[param_name] = None
+        if explorations_entry is not None:
+            explorations_list = explorations_entry[self.EXPLORATIONS]
+            for param_name in explorations_list:
+                param_name = compat.tostr(param_name)
+                if param_name not in traj._explored_parameters:
+                    traj._explored_parameters[param_name] = None
 
     def _trj_store_explorations(self, traj):
         """Stores a all explored parameter names for internal recall"""
@@ -909,7 +917,8 @@ class MongoStorageService(StorageService, HasLogger):
             explored_list = compat.listkeys(traj._explored_parameters)
             self._info_coll.update_one( {'_id': self.EXPLORATIONS},  {'$set':
                                                         {'_id': self.EXPLORATIONS,
-                                                       self.EXPLORATIONS: explored_list}})
+                                                       self.EXPLORATIONS: explored_list}},
+                                                        upsert=True)
 
     def _tree_store_sub_branch(self, traj_node, branch_name,
                                store_data=pypetconstants.STORE_DATA,
@@ -1001,7 +1010,7 @@ class MongoStorageService(StorageService, HasLogger):
 
     def _grp_store_group(self, traj_group, store_data=pypetconstants.STORE_DATA,
                          with_links=True, recursive=False, max_depth=None,
-                         parent_name = None):
+                         parent_name=None):
         """Stores a group node.
 
         For group nodes only annotations and comments need to be stored.
@@ -1035,12 +1044,13 @@ class MongoStorageService(StorageService, HasLogger):
             self._srvc_update_db(data, _id=traj_group.v_full_name, how=option)
             traj_group._stored = True
 
-            if parent_name is None:
-                parent_name = traj_group.v_location
+            if not traj_group.v_is_root:
+                if parent_name is None:
+                    parent_name = traj_group.v_location
 
-            self._srvc_update_db(entry={self.GROUPS: traj_group.v_name},
-                                         _id= parent_name,
-                                         how='$addToSet')
+                self._srvc_update_db(entry={self.GROUPS: traj_group.v_name},
+                                             _id= parent_name,
+                                             how='$addToSet')
 
             # Signal completed node loading
             self._node_processing_timer.signal_update()
@@ -1125,7 +1135,12 @@ class MongoStorageService(StorageService, HasLogger):
             self._tree_store_sub_branch(root, linked_traj_node.v_full_name,
                                         store_data=pypetconstants.STORE_DATA_SKIPPING,
                                         with_links=False, recursive=False)
-        self._srvc_update_db(entry={self.LINKS: [link, linked_traj_node.v_full_name]},
+        if node_in_traj.v_is_root:
+            full_name = link
+        else:
+            full_name = node_in_traj.v_full_name + '.' + link
+        self._srvc_update_db(entry={'_id': full_name, self.LINK: linking_name})
+        self._srvc_update_db(entry={self.LINKS: link},
                                          _id= node_in_traj.v_full_name,
                                          how='$addToSet')
 
@@ -1214,8 +1229,6 @@ class MongoStorageService(StorageService, HasLogger):
                                      'Please pass `True` of a list of strings to fine grain '
                                      'overwriting.' % str(overwrite))
 
-            self._prm_store_from_dict(fullname, store_dict)
-
             # Store meta information and annotations
             if overwrite:
                 option = '$set'
@@ -1246,6 +1259,8 @@ class MongoStorageService(StorageService, HasLogger):
             self._srvc_update_db(entry={self.LEAVES: instance.v_name},
                                          _id= parent_name,
                                          how='$addToSet')
+
+            self._prm_store_from_dict(fullname, store_dict)
 
             #self._logger.debug('Finished Storing `%s`.' % fullname)
             # Signal completed node loading
@@ -1369,7 +1384,7 @@ class MongoStorageService(StorageService, HasLogger):
 
 
     def _tree_load_nodes_dfs(self, parent_traj_node, load_data, with_links, recursive,
-                             max_depth, current_depth, trajectory, as_new, child_info):
+                             max_depth, current_depth, trajectory, as_new, child_name):
         """Loads a node from hdf5 file and if desired recursively everything below
 
         :param parent_traj_node: The parent node whose child should be loaded
@@ -1386,52 +1401,39 @@ class MongoStorageService(StorageService, HasLogger):
         if max_depth is None:
             max_depth = float('inf')
 
-        loading_list = [(parent_traj_node, current_depth, child_info)]
+        loading_list = [(parent_traj_node, current_depth, child_name)]
 
         while loading_list:
-            parent_traj_node, current_depth, child_info = loading_list.pop()
-            name, full_name = child_info
+            parent_traj_node, current_depth, child_name = loading_list.pop()
+            if parent_traj_node.v_is_root:
+                full_name = child_name
+            else:
+                full_name = parent_traj_node.v_full_name + '.' + child_name
             entry = self._tree_coll.find_one({'_id': full_name})
 
             if entry is None:
+                raise pex.DataNotInStorageError('Could not find `%s`!' % str(full_name))
 
-                self._srvc_update_db()
-                if name in parent_traj_node._links:
-                    self._logger.error('Could not find link to `%s` in DB, will '
-                                   'remove it from parent DB entry.' % full_name)
-                    self._tree_coll.update_one({'_id': parent_traj_node.v_full_name},
-                                           {'$pull': {self.LINKS: child_info}})
-                    continue
-                else:
-                    raise pex.DataNotInStorageError('Could not find `%s`!' % full_name)
-                # elif child_name in parent_traj_node._groups:
-                #     self._tree_coll.update_one({'_id': parent_traj_node.v_full_name},
-                #                            {'$pull': {self.GROUPS: child_name}})
-                # elif child_name in parent_traj_node._leaves:
-                #     self._tree_coll.update_one({'_id': parent_traj_node.v_full_name},
-                #                            {'$pull': {self.LEAVES: child_name}})
-                # else:
-                #     raise RuntimeError('You shall not pass')
-
-            if name in parent_traj_node._links:
+            is_link = self.LINK in entry
+            if is_link: # TOFO
                 if with_links:
                     # We end up here when auto-loading a soft link
                     self._tree_load_link(parent_traj_node, load_data=load_data, traj=trajectory,
-                                         as_new=as_new, link_info=child_info)
+                                         as_new=as_new, entry=entry, link=child_name)
                 continue
 
             is_leaf = self.LEAF in entry
-            in_trajectory = name in parent_traj_node._children
+            in_trajectory = child_name in parent_traj_node._children
 
             if is_leaf:
                 # In case we have a leaf node, we need to check if we have to create a new
                 # parameter or result
 
                 if in_trajectory:
-                    instance = parent_traj_node._children[name]
+                    instance = parent_traj_node._children[child_name]
                 # Otherwise we need to create a new instance
                 else:
-                    instance = self._tree_create_leaf(name, trajectory, entry)
+                    instance = self._tree_create_leaf(child_name, trajectory, entry)
 
                     # Add the instance to the trajectory tree
                     parent_traj_node._add_leaf_from_storage(args=(instance,), kwargs={})
@@ -1442,7 +1444,7 @@ class MongoStorageService(StorageService, HasLogger):
 
             else:
                 if in_trajectory:
-                    traj_group = parent_traj_node._children[name]
+                    traj_group = parent_traj_node._children[child_name]
 
                     if load_data == pypetconstants.OVERWRITE_DATA:
                         traj_group.v_annotations.f_empty()
@@ -1451,10 +1453,10 @@ class MongoStorageService(StorageService, HasLogger):
                     if self.CLASS_NAME in entry:
                         class_name = entry[self.CLASS_NAME]
                         class_constructor = trajectory._create_class(class_name)
-                        instance = trajectory._construct_instance(class_constructor, name)
+                        instance = trajectory._construct_instance(class_constructor, child_name)
                         args = (instance,)
                     else:
-                        args = (name,)
+                        args = (child_name,)
                     # If the group does not exist create it'
                     traj_group = parent_traj_node._add_group_from_storage(args=args, kwargs={})
 
@@ -1466,12 +1468,21 @@ class MongoStorageService(StorageService, HasLogger):
 
                 if recursive and current_depth < max_depth:
                     new_depth = current_depth + 1
-                    for what in (self.GROUPS, self.LEAVES):
+                    for what in (self.GROUPS, self.LEAVES, self.LINKS):
                         for child in entry.get(what, []):
-                            child_full_name = traj_group.v_full_name + '.' + child
-                            loading_list.append((traj_group, new_depth, (child, child_full_name)))
-                    for child_info in entry.get(self.LINKS, []):
-                        loading_list.append((traj_group, new_depth, child_info))
+                            loading_list.append((traj_group, new_depth, child))
+
+    def _tree_create_leaf(self, name, trajectory, entry):
+        """ Creates a new pypet leaf instance.
+
+        Returns the leaf and if it is an explored parameter the length of the range.
+
+        """
+        class_name = entry[self.CLASS_NAME]
+        # Create the instance with the appropriate constructor
+        class_constructor = trajectory._create_class(class_name)
+        instance = trajectory._construct_instance(class_constructor, name)
+        return instance
 
     def _grp_load_group(self, traj_group, load_data=pypetconstants.LOAD_DATA, with_links=True,
                         recursive=False, max_depth=None,
@@ -1486,10 +1497,10 @@ class MongoStorageService(StorageService, HasLogger):
         if recursive:
             parent_traj_node = traj_group.f_get_parent()
             self._tree_load_nodes_dfs(parent_traj_node, load_data=load_data, with_links=with_links,
-                                  recursive=recursive, max_depth=max_depth,
-                                  current_depth=0,
-                                  trajectory=_traj, as_new=_as_new,
-                                  child_info=(traj_group.v_name, traj_group.v_full_name))
+                                      recursive=recursive, max_depth=max_depth,
+                                      current_depth=0,
+                                      trajectory=_traj, as_new=_as_new,
+                                      child_name=traj_group.v_name)
         else:
             if load_data == pypetconstants.LOAD_NOTHING:
                 return
@@ -1523,7 +1534,7 @@ class MongoStorageService(StorageService, HasLogger):
             anno_dict = pickle.loads(entry[self.ANNOTATIONS])
             annotations.f_set(**anno_dict)
 
-    def _tree_load_link(self, new_traj_node, load_data, traj, as_new, link_info):
+    def _tree_load_link(self, new_traj_node, load_data, traj, as_new, entry, link):
         """ Loads a link
 
         :param new_traj_node: Node in traj containing link
@@ -1533,26 +1544,34 @@ class MongoStorageService(StorageService, HasLogger):
         :param entry: The link db entry
 
         """
+        full_name = entry[self.LINK]
 
-        link_name, full_name = link_info
-
-        if (not link_name in new_traj_node._links or
+        if (not link in new_traj_node._links or
                     load_data==pypetconstants.OVERWRITE_DATA):
 
             if not full_name in traj:
-                self._tree_load_sub_branch(traj, full_name,
-                                           load_data=pypetconstants.LOAD_SKELETON,
-                                           with_links=False, recursive=False, _trajectory=traj,
-                                           _as_new=as_new)
+                try:
+                    self._tree_load_sub_branch(traj, full_name,
+                                               load_data=pypetconstants.LOAD_SKELETON,
+                                               with_links=False, recursive=False, _trajectory=traj,
+                                               _as_new=as_new)
+                except pex.DataNotInStorageError:
+                    self._logger.error('Linked node not found will remove link `%s` under `%s`!'
+                                       % (link, new_traj_node.v_full_name))
+                    self._srvc_flush_tree_db()
+                    self._tree_coll.update_one({'_id': new_traj_node.v_full_name},
+                                           {'$pull': {self.LINKS: child_info}})
+                    self._tree_coll.delete_one(entry)
+                    return
 
             if (load_data == pypetconstants.OVERWRITE_DATA and
-                        link_name in new_traj_node._links):
-                new_traj_node.f_remove_link(link_name)
-            if not link_name in new_traj_node._links:
+                        link in new_traj_node._links):
+                new_traj_node.f_remove_link(link)
+            if not link in new_traj_node._links:
                 new_traj_node._nn_interface._add_generic(new_traj_node,
                                                             type_name=nn.LINK,
                                                             group_type_name=nn.GROUP,
-                                                            args=(link_name,
+                                                            args=(link,
                                                                   traj.f_get(full_name)),
                                                             kwargs={},
                                                             add_prefix=False,
@@ -1618,30 +1637,26 @@ class MongoStorageService(StorageService, HasLogger):
 
         current_depth = 1
 
-        current_name = traj_node.v_full_name
         for name in split_names:
             if current_depth > max_depth:
                 return
             # First load along the branch
-            current_name += '.%s' % name
             self._tree_load_nodes_dfs(traj_node, load_data=load_data, with_links=with_links,
-                                  recursive=False, max_depth=max_depth,
-                                  current_depth=current_depth,
-                                  trajectory=_trajectory, as_new=_as_new,
-                                  child_info=(name, current_name))
-
+                                      recursive=False, max_depth=max_depth,
+                                      current_depth=current_depth,
+                                      trajectory=_trajectory, as_new=_as_new,
+                                      child_name=name)
             current_depth += 1
 
             traj_node = traj_node._children[name]
 
         if current_depth <= max_depth:
             # Then load recursively all data in the last group and below
-            current_name += '.%s' % final_group_name
             self._tree_load_nodes_dfs(traj_node, load_data=load_data, with_links=with_links,
-                                  recursive=recursive, max_depth=max_depth,
-                                  current_depth=current_depth, trajectory=_trajectory,
-                                  as_new=_as_new,
-                                  child_info=(final_group_name, current_name))
+                                      recursive=recursive, max_depth=max_depth,
+                                      current_depth=current_depth, trajectory=_trajectory,
+                                      as_new=_as_new,
+                                      child_name=final_group_name)
 
     def _prm_load_parameter_or_result(self, instance,
                                       load_data=pypetconstants.LOAD_DATA,
@@ -1787,7 +1802,7 @@ class MongoStorageService(StorageService, HasLogger):
     def _prm_load_into_dict(self, full_name, load_dict, entry, instance,
                             load_only, load_except):
         """Loads into dictionary"""
-        self._srvc_update_db()
+        self._srvc_flush_tree_db()
         for load_name in entry.get(self.DATA, []):
 
             if load_only is not None:
@@ -1802,7 +1817,7 @@ class MongoStorageService(StorageService, HasLogger):
                     continue
 
             full_load_name = full_name + '.' + load_name
-            to_load = self._arctic_lib.read(full_load_name)
+            to_load = self._arctic_lib.read(full_load_name).data
             load_dict[load_name] = to_load
 
     def _trj_load_trajectory(self, traj, as_new, load_parameters, load_derived_parameters,
@@ -1903,10 +1918,14 @@ class MongoStorageService(StorageService, HasLogger):
         maximum_display_other = 10
         counter = 0
 
-        for children in [self._trajectory_group._v_groups, self._trajectory_group._v_links]:
-            for hdf5_group_name in children:
-                hdf5_group = children[hdf5_group_name]
-                child_name = hdf5_group._v_name
+        traj_entry = self._tree_coll.find_one({'_id': ''})
+        for kdx, children in enumerate([traj_entry.get(self.GROUPS, []),
+                         traj_entry.get(self.LEAVES, []),
+                         traj_entry.get(self.LINKS, [])]):
+            for child_name in children:
+
+                if kdx == 2:
+                    child_name, _ = child_name
 
                 load_subbranch = True
                 if child_name == 'config':
@@ -1960,7 +1979,7 @@ class MongoStorageService(StorageService, HasLogger):
         as new. Updates the run information as well.
 
         """
-        info_entry = self._info_coll.find_one[{'_id': self.INFO}]
+        info_entry = self._info_coll.find_one({'_id': self.INFO})
 
         try:
             version = compat.tostr(info_entry['version'])
@@ -1995,6 +2014,8 @@ class MongoStorageService(StorageService, HasLogger):
             traj._traj_name = traj._name
             traj._version = version
             traj._python = python
+
+            self._traj_name = traj._name
 
             if with_run_information:
                 for entry in self._run_coll.find():

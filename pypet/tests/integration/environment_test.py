@@ -21,6 +21,14 @@ else:
     import unittest
 
 try:
+    import pymongo
+    import arctic
+    from pypet.backends.mongodb import MongoStorageService
+except ImportError:
+    pymongo = None
+    arctic = None
+
+try:
     import psutil
 except ImportError:
     psutil = None
@@ -1260,7 +1268,7 @@ class ResultSortTestMongo(ResultSortTest):
 
     def tearDown(self):
         self.env.f_disable_logging()
-        import pymongo
+
         if isinstance(self.mongo_host, pymongo.MongoClient):
             client = self.mongo_host
         else:
@@ -1271,6 +1279,16 @@ class ResultSortTestMongo(ResultSortTest):
 
     def test_if_results_are_sorted_correctly(self):
         super(ResultSortTestMongo, self).test_if_results_are_sorted_correctly()
+
+    def load_trajectory(self,trajectory_index=None,trajectory_name=None,as_new=False, how=2):
+        ### Load The Trajectory and check if the values are still the same
+        newtraj = Trajectory()
+        newtraj.v_storage_service=MongoStorageService(mongo_db=self.mongo_db,
+                                                      mongo_host=self.mongo_host,
+                                                      mongo_port=self.mongo_port)
+        newtraj.f_load(name=trajectory_name, index=trajectory_index, as_new=as_new,
+                       load_derived_parameters=how, load_results=how)
+        return newtraj
 
 
 # def test_runfunc(traj, list_that_changes):
