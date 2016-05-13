@@ -21,7 +21,7 @@ from pypet._version import __version__ as VERSION
 from pypet.parameter import ObjectTable, Parameter
 import pypet.naturalnaming as nn
 from pypet.pypetlogging import HasLogger, DisableAllLogging
-from pypet.storageservice import NodeProcessingTimer
+from pypet.storageservice import NodeProcessingTimer, HDF5StorageService
 
 
 MAX_NAME_LENGTH = 32
@@ -100,6 +100,33 @@ class MongoStorageService(StorageService, HasLogger):
     '''Info entry'''
     EXPLORATIONS = 'explorations'
     '''Explorations entry'''
+
+
+    COLL_TYPE = 'COLL_TYPE'
+    '''Type of a container stored to hdf5, like list,tuple,dict,etc
+
+    Must be stored in order to allow perfect reconstructions.
+    '''
+
+    COLL_LIST = 'COLL_LIST'
+    ''' Container was a list'''
+    COLL_TUPLE = 'COLL_TUPLE'
+    ''' Container was a tuple'''
+    COLL_NDARRAY = 'COLL_NDARRAY'
+    ''' Container was a numpy array'''
+    COLL_MATRIX = 'COLL_MATRIX'
+    ''' Container was a numpy matrix'''
+    COLL_DICT = 'COLL_DICT'
+    ''' Container was a dictionary'''
+    COLL_EMPTY_DICT = 'COLL_EMPTY_DICT'
+    ''' Container was an empty dictionary'''
+    COLL_SCALAR = 'COLL_SCALAR'
+    ''' No container, but the thing to store was a scalar'''
+    COLL_OBJ_TABLE = '__COLL_OBJ_TABLE__'
+    ''' Is object table '''
+
+    SCALAR_TYPE = 'SCALAR_TYPE'
+    ''' Type of scalars stored into a container'''
 
 
     @property
@@ -1281,7 +1308,8 @@ class MongoStorageService(StorageService, HasLogger):
         self._srvc_flush_tree_db()
         for key, data_to_store in store_dict.items():
             name = fullname + '.' + key
-            self._arctic_lib.write(name, data_to_store)
+            metadata = self._all_set_meta_to_recall_natives(data_to_store)
+            self._arctic_lib.write(name, data_to_store, metadata=metadata)
 
 
     def _all_delete_parameter_or_result_or_group(self, instance,
@@ -1347,12 +1375,84 @@ class MongoStorageService(StorageService, HasLogger):
                             delete_item in instance):
                     delattr(instance, delete_item)
 
-                deletion = self._arctic_lib.delete(instance.v_full_name + '.' + delete_item)
+                self._arctic_lib.delete(instance.v_full_name + '.' + delete_item)
                 self._tree_coll.update_one({'_id': instance.v_full_name}, {'$pull': {self.DATA:
                                                                                 delete_item}})
-                if deletion.deleted_count == 0:
-                    self._logger.warning('Could not delete `%s` from `%s`. Entry not found!' %
-                                         (delete_item, instance.v_full_name))
+                # if deletion.deleted_count == 0:
+                #     self._logger.warning('Could not delete `%s` from `%s`. Entry not found!' %
+                #                          (delete_item, instance.v_full_name))
+
+    @staticmethod
+    def _all_set_meta_to_recall_natives(data):
+        """Stores original data type to hdf5 node attributes for preserving the data type.
+
+        :param data:
+
+            Data to be stored
+
+        :param ptitem:
+
+            HDF5 node to store data types as attributes. Can also be just a PTItemMock.
+
+        :param prefix:
+
+            String prefix to label and name data in HDF5 attributes
+
+        """
+        # If `data` is a container, remember the container type
+        meta_data = {}
+        if type(data) is tuple:
+            meta_data[HDF5StorageService.COLL_TYPE] = HDF5StorageService.COLL_TUPLE
+
+        elif type(data) is list:
+            meta_data[HDF5StorageService.COLL_TYPE] = HDF5StorageService.COLL_LIST
+
+        elif type(data) is np.ndarray:
+            meta_data[HDF5StorageService.COLL_TYPE] = HDF5StorageService.COLL_NDARRAY
+
+        elif type(data) is np.matrix:
+            meta_data[HDF5StorageService.COLL_TYPE] = HDF5StorageService.COLL_MATRIX
+
+        elif type(data) in pypetconstants.PARAMETER_SUPPORTED_DATA:
+            meta_data[HDF5StorageService.COLL_TYPE] = HDF5StorageService.COLL_SCALAR
+
+            strtype = type(data).__name__
+
+            if not strtype in pypetconstants.PARAMETERTYPEDICT:
+                raise TypeError('I do not know how to handle `%s` its type is `%s`.' %
+                                (str(data), repr(type(data))))
+
+            meta_data[HDF5StorageService.SCALAR_TYPE] = HDF5StorageService.SCALAR_TYPE, strtype
+
+        elif type(data) is dict:
+            if len(data) > 0:
+                meta_data[HDF5StorageService.COLL_TYPE] = HDF5StorageService.COLL_DICT
+            else:
+                meta_data[HDF5StorageService.COLL_TYPE] = HDF5StorageService.COLL_EMPTY_DICT
+        else:
+            raise TypeError('I do not know how to handle `%s` its type is `%s`.' %
+                            (str(data), repr(type(data))))
+
+        if type(data) in (list, tuple):
+            # If data is a list or tuple we need to remember the data type of the elements
+            # in the list or tuple.
+            # We do NOT need to remember the elements of `dict` explicitly, though.
+            # `dict` is stored
+            # as an `ObjectTable` and thus types are already conserved.
+            if len(data) > 0:
+                strtype = type(data[0]).__name__
+
+                if not strtype in pypetconstants.PARAMETERTYPEDICT:
+                    raise TypeError('I do not know how to handle `%s` its type is '
+                                    '`%s`.' % (str(data), strtype))
+
+                meta_data[HDF5StorageService.SCALAR_TYPE] = strtype
+        elif (type(data) in (np.ndarray, np.matrix) and
+                  np.issubdtype(data.dtype, compat.unicode_type)):
+            meta_data[HDF5StorageService.SCALAR_TYPE] = compat.unicode_type.__name__
+
+        return meta_data
+
 
     def _srn_store_single_run(self, traj,
                               recursive=True,

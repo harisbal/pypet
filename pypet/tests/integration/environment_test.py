@@ -1231,6 +1231,45 @@ class ResultSortTestMongo(ResultSortTest):
         self.mongo_port = None
         self.overwrite_db = True
 
+    def test_f_iter_runs_auto_load(self):
+
+         ###Explore
+        self.explore(self.traj)
+
+        results = self.env.f_run(multiply)
+        self.are_results_in_order(results)
+        traj = self.traj
+        self.assertTrue(len(traj) == len(compat.listvalues(self.explore_dict)[0]))
+
+        self.traj.f_load_skeleton()
+        self.traj.f_load_items(self.traj.f_to_dict().keys(), only_empties=True)
+        self.check_if_z_is_correct(traj)
+
+        newtraj = Trajectory()
+        newtraj.v_storage_service=self.traj.v_storage_service
+        newtraj.f_load(name=self.traj.v_name, index=None, as_new=False, load_data=0)
+        newtraj.v_auto_load = True
+
+        newtraj.par.f_load_child('y', load_data=1)
+
+        for idx, run_name in enumerate(self.traj.f_iter_runs()):
+            newtraj.v_crun=run_name
+            self.traj.v_idx = idx
+            newtraj.v_idx = idx
+            nameset = set((x.v_name for x in traj.f_iter_nodes(predicate=(idx,))))
+            self.assertTrue('run_%08d' % (idx+1) not in nameset)
+            self.assertTrue('run_%08d' % idx in nameset)
+            self.assertTrue(traj.v_crun == run_name)
+            self.assertTrue(newtraj.res.runs.crun.z==newtraj.par.x*newtraj.par.y,' z != x*y: %s != %s * %s' %
+                                                  (str(newtraj.crun.z),str(newtraj.x),str(newtraj.y)))
+
+
+        traj = self.traj
+        self.assertTrue(traj.v_idx == -1)
+        self.assertTrue(traj.v_crun is None)
+        self.assertTrue(traj.v_crun_ == pypetconstants.RUN_NAME_DUMMY)
+        self.assertTrue(newtraj.v_idx == idx)
+
     def setUp(self):
         self.set_mode()
 
