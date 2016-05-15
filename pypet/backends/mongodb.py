@@ -1,5 +1,6 @@
 import pymongo
-import itertools as itools
+from bson import Binary
+import os
 import arctic
 import arctic.exceptions as aexc
 try:
@@ -14,6 +15,7 @@ import numpy as np
 from pandas import DataFrame, Series, Panel, Panel4D, HDFStore
 
 import pypet.compat as compat
+from pypet.utils.decorators import retry
 import pypet.utils.ptcompat as ptcompat
 import pypet.pypetconstants as pypetconstants
 import pypet.pypetexceptions as pex
@@ -36,19 +38,16 @@ class MongoStorageService(StorageService, HasLogger):
                  mongo_db = None, trajectory=None,
                  max_bulk_length=0, protocol=2,
                  display_time = 20,
-                 overwrite_db=False):
+                 overwrite_db=False,
+                 client_kwargs=None):
         self._set_logger()
-        if isinstance(mongo_host, compat.base_type):
-            self._mongo_host = mongo_host
-            self._mongo_port = mongo_port
-            self._client = pymongo.MongoClient(mongo_host, mongo_port, connect=False)
-        else:
-            self._client = mongo_host
-            self._mongo_host = None
-            self._mongo_port = None
+        if client_kwargs is None:
+            client_kwargs = {}
+        self._client_kwargs = client_kwargs
+        self._mongo_host = mongo_host
+        self._mongo_port = mongo_port
 
         self._protocol = protocol
-        self._arctic = arctic.Arctic(self._client)
         self._max_bulk_length = max_bulk_length
         self._info_coll = None
         self._tree_coll = None
@@ -59,6 +58,7 @@ class MongoStorageService(StorageService, HasLogger):
         self._traj_index = None
         self._traj_stump = None
         self._db_name = None
+        self._db = None
         self._bulk = []
 
         if mongo_db is None and trajectory is not None:
@@ -66,13 +66,33 @@ class MongoStorageService(StorageService, HasLogger):
         elif mongo_db is None:
             mongo_db = 'experiments'
 
+        self._create_client()
         self._srvc_set_db_name(mongo_db)
-        self._db = None
         self._is_open = False
         self._display_time = display_time
 
         if overwrite_db and self._db_name in self._client.database_names():
             self._client.drop_database(self._db_name)
+
+    def _create_client(self):
+        self._client = pymongo.MongoClient(self._mongo_host, self._mongo_port,
+                                           connect=False, **self._client_kwargs)
+        self._arctic = arctic.Arctic(self._client)
+
+    def __getstate__(self):
+        result = super(MongoStorageService, self).__getstate__()
+        result['_client'] = None
+        result['_arctic'] = None
+        result['_info_coll'] = None
+        result['_tree_coll'] = None
+        result['_run_coll'] = None
+        result['_arctic_lib'] = None
+        result['_db'] = None
+        return result
+
+    def __setstate__(self, statedict):
+        super(MongoStorageService, self).__setstate__(statedict)
+        self._create_client()
 
     CLASS_NAME = 'class_name'
     ''' Name of a parameter or result class, is converted to a constructor'''
@@ -102,32 +122,9 @@ class MongoStorageService(StorageService, HasLogger):
     '''Explorations entry'''
 
 
-    COLL_TYPE = 'COLL_TYPE'
-    '''Type of a container stored to hdf5, like list,tuple,dict,etc
-
-    Must be stored in order to allow perfect reconstructions.
-    '''
-
-    COLL_LIST = 'COLL_LIST'
-    ''' Container was a list'''
-    COLL_TUPLE = 'COLL_TUPLE'
-    ''' Container was a tuple'''
-    COLL_NDARRAY = 'COLL_NDARRAY'
-    ''' Container was a numpy array'''
-    COLL_MATRIX = 'COLL_MATRIX'
-    ''' Container was a numpy matrix'''
-    COLL_DICT = 'COLL_DICT'
-    ''' Container was a dictionary'''
-    COLL_EMPTY_DICT = 'COLL_EMPTY_DICT'
-    ''' Container was an empty dictionary'''
-    COLL_SCALAR = 'COLL_SCALAR'
-    ''' No container, but the thing to store was a scalar'''
-    COLL_OBJ_TABLE = '__COLL_OBJ_TABLE__'
-    ''' Is object table '''
-
-    SCALAR_TYPE = 'SCALAR_TYPE'
-    ''' Type of scalars stored into a container'''
-
+    PICKLE_TYPES = (tuple, list, dict, ObjectTable, compat.bytes_type)
+    BINARY = 'binary'
+    MATRIX = 'matrix'
 
     @property
     def is_open(self):
@@ -414,9 +411,10 @@ class MongoStorageService(StorageService, HasLogger):
         :raises: NoSuchServiceError if message or data is not understood
 
         """
+        opened = False
         try:
 
-            self._srvc_opening_routine('a', msg, kwargs)
+            opened = self._srvc_opening_routine('a', msg, kwargs)
 
             if msg == pypetconstants.MERGE:
                 self._trj_merge_trajectories(*args, **kwargs)
@@ -460,6 +458,8 @@ class MongoStorageService(StorageService, HasLogger):
         except:
             self._logger.error('Failed storing `%s`' % str(stuff_to_store))
             raise
+        finally:
+            self._srvc_closing_routine(opened)
 
 
     def load(self, msg, stuff_to_load, *args, **kwargs):
@@ -586,8 +586,9 @@ class MongoStorageService(StorageService, HasLogger):
             DataNotInStorageError if data to be loaded cannot be found on disk
 
         """
+        opened = False
         try:
-            self._srvc_opening_routine('r', msg, kwargs)
+            opened = self._srvc_opening_routine('r', msg, kwargs)
 
             if msg == pypetconstants.TRAJECTORY:
                 self._trj_load_trajectory(stuff_to_load, *args, **kwargs)
@@ -613,6 +614,8 @@ class MongoStorageService(StorageService, HasLogger):
         except:
             self._logger.error('Failed loading  `%s`' % str(stuff_to_load))
             raise
+        finally:
+            self._srvc_closing_routine(opened)
 
     def _trj_store_trajectory(self, traj, only_init=False,
                           store_data=pypetconstants.STORE_DATA,
@@ -827,6 +830,7 @@ class MongoStorageService(StorageService, HasLogger):
             self._node_processing_timer = NodeProcessingTimer(display_time=self._display_time,
                                                               logger_name=self._logger.name)
             self._is_open = True
+            return True
 
     def _srvc_set_db_name(self, db_name):
         if db_name.startswith(self._arctic.DB_PREFIX):
@@ -847,7 +851,7 @@ class MongoStorageService(StorageService, HasLogger):
         if 'trajectory_name' in kwargs:
             traj_name = kwargs.pop('trajectory_name')
             if self._traj_name is not None and (traj_name != self._traj_name):
-                self._srvc_closing_routine()
+                self._srvc_closing_routine(True)
             self._traj_name = traj_name
             self._traj_stump = self._traj_name.lower()[:MAX_NAME_LENGTH]
             if self._db_name is None:
@@ -861,7 +865,7 @@ class MongoStorageService(StorageService, HasLogger):
                 self._traj_stump = sorted(all_trajs)[self._traj_index].split('_'+TREE_COLL)[0]
                 self._traj_name = self._traj_stump + '...'
 
-    def _srvc_closing_routine(self):
+    def _srvc_closing_routine(self, opened):
         """Routine to close an hdf5 file
 
         The file is closed only when `closing=True`. `closing=True` means that
@@ -869,21 +873,31 @@ class MongoStorageService(StorageService, HasLogger):
         and closing of the file if `store` or `load` are called recursively.
 
         """
-        self._srvc_flush_tree_db()
-        self._client.close()
-        self._info_coll = None
-        self._tree_coll = None
-        self._arctic_lib = None
-        self._mode = None
-        self._traj_name = None
-        self._db = None
-        self._traj_stump = None
-        self._is_open = False
-        self._traj_index = None
+        if opened:
+            self._srvc_flush_tree_db()
+            self._client.close()
+            self._client._topology._pid = None
+            self._info_coll = None
+            self._tree_coll = None
+            self._arctic_lib = None
+            self._mode = None
+            self._traj_name = None
+            self._db = None
+            self._traj_stump = None
+            self._is_open = False
+            self._traj_index = None
+
+    @retry(9, Exception, 0.01, 'pypet.retry')
+    def _retry_write(self):
+        self._tree_coll.bulk_write(self._bulk)
 
     def _srvc_flush_tree_db(self):
         if self._bulk:
-            self._tree_coll.bulk_write(self._bulk)
+            try:
+                self._retry_write()
+            except:
+                self._logger.error('Bulk write error with bul `%s`' % str(self._bulk))
+                raise
             self._bulk = []
 
     def _srvc_update_db(self, entry, _id, how='$setOnInsert', upsert=True):
@@ -1027,8 +1041,6 @@ class MongoStorageService(StorageService, HasLogger):
 
             traj_node = traj_node._children[name]
 
-            hdf5_group = getattr(hdf5_group, name)
-
         # Store final group and recursively everything below it
         if current_depth <= max_depth:
             self._tree_store_nodes_dfs(traj_node, leaf_name, store_data=store_data,
@@ -1093,8 +1105,8 @@ class MongoStorageService(StorageService, HasLogger):
         """Stores annotations into data."""
 
         if not traj_node.v_annotations.f_is_empty():
-            data[self.ANNOTATIONS] = pickle.dumps(traj_node.v_annotations.f_to_dict(),
-                                                  protocol=self._protocl)
+            data[self.ANNOTATIONS] = Binary(pickle.dumps(traj_node.v_annotations.f_to_dict(),
+                                                  protocol=self._protocol))
 
         return data
 
@@ -1166,7 +1178,8 @@ class MongoStorageService(StorageService, HasLogger):
             full_name = link
         else:
             full_name = node_in_traj.v_full_name + '.' + link
-        self._srvc_update_db(entry={'_id': full_name, self.LINK: linking_name})
+        self._srvc_update_db(entry={'_id': full_name, self.LINK: linking_name},
+                             _id = full_name)
         self._srvc_update_db(entry={self.LINKS: link},
                                          _id= node_in_traj.v_full_name,
                                          how='$addToSet')
@@ -1308,9 +1321,17 @@ class MongoStorageService(StorageService, HasLogger):
         self._srvc_flush_tree_db()
         for key, data_to_store in store_dict.items():
             name = fullname + '.' + key
-            metadata = self._all_set_meta_to_recall_natives(data_to_store)
-            self._arctic_lib.write(name, data_to_store, metadata=metadata)
-
+            if type(data_to_store) in self.PICKLE_TYPES:
+                data_to_store = Binary(pickle.dumps(data_to_store, protocol=self._protocol))
+                metadata = {self.BINARY: True}
+            elif type(data_to_store) is np.matrix:
+                metadata = {self.MATRIX: True}
+            else:
+                metadata = None
+            try:
+                self._arctic_lib.write(name, data_to_store, metadata=metadata)
+            except:
+                raise
 
     def _all_delete_parameter_or_result_or_group(self, instance,
                                                  delete_only=None,
@@ -1346,8 +1367,8 @@ class MongoStorageService(StorageService, HasLogger):
 
 
         if delete_only is None:
-            if instance.v_is_group and not recursive and (len(entry[self.GROUPS]) +
-                    len(entry[self.LEAVES]) + len(entry[self.LINKS]) != 0):
+            if instance.v_is_group and not recursive and (len(entry.get(self.GROUPS,{})) +
+                    len(entry.get(self.LEAVES,{})) + len(entry.get(self.LINKS, {})) != 0):
                     raise TypeError('You cannot remove the group `%s`, it has children, please '
                                     'use `recursive=True` to enforce removal.' %
                                     instance.v_full_name)
@@ -1383,76 +1404,34 @@ class MongoStorageService(StorageService, HasLogger):
                 #                          (delete_item, instance.v_full_name))
 
     @staticmethod
-    def _all_set_meta_to_recall_natives(data):
+    def _prm_set_recall_object_table(data):
         """Stores original data type to hdf5 node attributes for preserving the data type.
 
         :param data:
 
             Data to be stored
 
-        :param ptitem:
-
-            HDF5 node to store data types as attributes. Can also be just a PTItemMock.
-
-        :param prefix:
-
-            String prefix to label and name data in HDF5 attributes
-
         """
-        # If `data` is a container, remember the container type
-        meta_data = {}
-        if type(data) is tuple:
-            meta_data[HDF5StorageService.COLL_TYPE] = HDF5StorageService.COLL_TUPLE
-
-        elif type(data) is list:
-            meta_data[HDF5StorageService.COLL_TYPE] = HDF5StorageService.COLL_LIST
-
-        elif type(data) is np.ndarray:
-            meta_data[HDF5StorageService.COLL_TYPE] = HDF5StorageService.COLL_NDARRAY
-
-        elif type(data) is np.matrix:
-            meta_data[HDF5StorageService.COLL_TYPE] = HDF5StorageService.COLL_MATRIX
-
-        elif type(data) in pypetconstants.PARAMETER_SUPPORTED_DATA:
-            meta_data[HDF5StorageService.COLL_TYPE] = HDF5StorageService.COLL_SCALAR
-
-            strtype = type(data).__name__
-
+        dtypes = {}
+        for col in data:
+            strtype = type(data[col][0]).__name__
             if not strtype in pypetconstants.PARAMETERTYPEDICT:
-                raise TypeError('I do not know how to handle `%s` its type is `%s`.' %
-                                (str(data), repr(type(data))))
-
-            meta_data[HDF5StorageService.SCALAR_TYPE] = HDF5StorageService.SCALAR_TYPE, strtype
-
-        elif type(data) is dict:
-            if len(data) > 0:
-                meta_data[HDF5StorageService.COLL_TYPE] = HDF5StorageService.COLL_DICT
-            else:
-                meta_data[HDF5StorageService.COLL_TYPE] = HDF5StorageService.COLL_EMPTY_DICT
-        else:
-            raise TypeError('I do not know how to handle `%s` its type is `%s`.' %
-                            (str(data), repr(type(data))))
-
-        if type(data) in (list, tuple):
-            # If data is a list or tuple we need to remember the data type of the elements
-            # in the list or tuple.
-            # We do NOT need to remember the elements of `dict` explicitly, though.
-            # `dict` is stored
-            # as an `ObjectTable` and thus types are already conserved.
-            if len(data) > 0:
-                strtype = type(data[0]).__name__
-
-                if not strtype in pypetconstants.PARAMETERTYPEDICT:
-                    raise TypeError('I do not know how to handle `%s` its type is '
-                                    '`%s`.' % (str(data), strtype))
-
-                meta_data[HDF5StorageService.SCALAR_TYPE] = strtype
-        elif (type(data) in (np.ndarray, np.matrix) and
-                  np.issubdtype(data.dtype, compat.unicode_type)):
-            meta_data[HDF5StorageService.SCALAR_TYPE] = compat.unicode_type.__name__
-
+                raise TypeError('I do not know how to handle coulumn `%s` its type is `%s`.' %
+                            (str(col), repr(type(data))))
+            dtypes[col] = strtype
+        meta_data = {MongoStorageService.COLL_OBJ_TABLE: dtypes}
         return meta_data
 
+    @staticmethod
+    def _prm_recall_obj_table(obj_table, meta_data):
+        dtypes = meta_data[MongoStorageService.COLL_OBJ_TABLE]
+        res = {}
+        for key, val in dtypes.items():
+            dtype = pypetconstants.PARAMETERTYPEDICT[val]
+            res[key] = [dtype(x) for x in obj_table[key]]
+            del obj_table[key]
+
+        return ObjectTable(data=res)
 
     def _srn_store_single_run(self, traj,
                               recursive=True,
@@ -1917,7 +1896,15 @@ class MongoStorageService(StorageService, HasLogger):
                     continue
 
             full_load_name = full_name + '.' + load_name
-            to_load = self._arctic_lib.read(full_load_name).data
+            load_elem = self._arctic_lib.read(full_load_name)
+            to_load = load_elem.data
+            meta_data = load_elem.metadata
+            if meta_data is not None:
+                if self.BINARY in meta_data:
+                    to_load = pickle.loads(to_load)
+                elif self.MATRIX in meta_data:
+                    to_load = np.matrix(to_load)
+
             load_dict[load_name] = to_load
 
     def _trj_load_trajectory(self, traj, as_new, load_parameters, load_derived_parameters,

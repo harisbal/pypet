@@ -7,12 +7,20 @@ import os
 from pypet import pypetconstants
 from pypet.environment import Environment
 from pypet.tests.integration.environment_test import EnvironmentTest, ResultSortTest,\
-    TestOtherHDF5Settings2, multiply
+    TestOtherHDF5Settings2, multiply, ResultSortMongoTest, EnvironmentMongoTest
 from pypet.tests.testutils.ioutils import run_suite,make_temp_dir, make_trajectory_name, \
      parse_args, get_log_config, unittest, get_random_port_url
 from pypet.tests.testutils.data import create_param_dict, add_params
 import pypet.compat as compat
 import platform
+
+try:
+    import pymongo
+    import arctic
+    from pypet.backends.mongodb import MongoStorageService
+except ImportError:
+    pymongo = None
+    arctic = None
 
 try:
     import psutil
@@ -179,6 +187,17 @@ class MultiprocPoolSortPipeTest(ResultSortTest):
 #         self.multiproc = True
 #         self.ncores = 3
 #         self.use_pool=False
+
+@unittest.skipIf(pymongo is None, 'Can only be run with pymongo')
+class MultiprocSortNoPoolMongoTest(ResultSortMongoTest):
+
+    tags = 'integration', 'mongo', 'environment', 'multiproc', 'nopool',
+
+    def set_mode(self):
+        super(MultiprocSortNoPoolMongoTest, self).set_mode()
+        self.multiproc = True
+        self.ncores = 3
+        self.use_pool=False
 
 
 class MultiprocNoPoolSortLocalTest(ResultSortTest):
@@ -354,6 +373,24 @@ class MultiprocFrozenPoolPipeTest(EnvironmentTest):
         self.ncores = 4
         self.use_pool=True
         self.niceness = check_nice(10)
+
+
+@unittest.skipIf(pymongo is None, 'Can only be run with pymongo')
+class MultiprocFrozenPoolMongoTest(EnvironmentMongoTest):
+
+    tags = 'integration', 'hdf5', 'environment', 'multiproc', 'mongo', 'pool', 'freeze_input'
+
+    # def test_run(self):
+    #     super(MultiprocLockTest, self).test_run()
+
+    def set_mode(self):
+        super(MultiprocFrozenPoolMongoTest, self).set_mode()
+        self.multiproc = True
+        self.freeze_input = True
+        self.ncores = 4
+        self.gc_interval = 3
+        self.niceness = check_nice(1)
+        self.use_pool=True
 
 
 class MultiprocFrozenPoolLocalTest(EnvironmentTest):

@@ -1,7 +1,6 @@
 __author__ = 'Robert Meyer'
 
 import os
-import platform
 import logging
 import time
 import numpy as np
@@ -386,8 +385,9 @@ class EnvironmentTest(TrajectoryComparator):
         get_root_logger().info(str(self.env))
         get_root_logger().info(repr(self.env))
 
-        newtraj = Trajectory()
-        newtraj.f_load(name=self.traj.v_name, as_new=False, load_data=2, filename=self.filename)
+        #newtraj = Trajectory()
+        newtraj = self.load_trajectory(trajectory_name=self.traj.v_name)
+        #newtraj.f_load(name=self.traj.v_name, as_new=False, load_data=2, filename=self.filename)
 
         self.traj.f_load_skeleton()
         self.traj.f_load_items(self.traj.f_to_dict().keys(), only_empties=True)
@@ -1212,7 +1212,165 @@ class ResultSortTest(TrajectoryComparator):
         traj.v_shortcuts=True
 
 
-class ResultSortTestMongo(ResultSortTest):
+class EnvironmentMongoTest(EnvironmentTest):
+    tags = 'integration', 'mongo', 'environment'
+
+    def set_mode(self):
+        self.mode = None
+        self.multiproc = False
+        self.gc_interval = None
+        self.ncores = 1
+        self.use_pool=True
+        self.use_scoop=False
+        self.freeze_input=False
+        self.log_stdout=False
+        self.wildcard_functions = None
+        self.niceness = None
+        self.port = None
+        self.timeout = None
+        self.add_time=True
+        self.graceful_exit = False
+        self.mongo_host = 'localhost'
+        self.mongo_port = None
+
+    def load_trajectory(self,trajectory_index=None,trajectory_name=None,as_new=False):
+        ### Load The Trajectory and check if the values are still the same
+        newtraj = Trajectory()
+        newtraj.v_storage_service=MongoStorageService(mongo_db=self.mongo_db,
+                          mongo_host = self.mongo_host,
+                          mongo_port = self.mongo_port)
+        newtraj.f_load(name=trajectory_name, index=trajectory_index, as_new=as_new,
+                       load_parameters=2, load_derived_parameters=2, load_results=2,
+                       load_other_data=2)
+        return newtraj
+
+    @unittest.skip
+    def test_errors(self):
+        pass
+
+    @unittest.skip
+    def test_two_runs(self):
+        pass
+
+    @unittest.skip
+    def test_switch_ON_large_tables(self):
+        pass
+
+    @unittest.skip
+    def test_NOT_purge_duplicate_comments(self):
+        pass
+
+    @unittest.skip
+    def test_switch_on_all_comments(self):
+        pass
+
+    @unittest.skip
+    def test_purge_duplicate_comments(self):
+        pass
+
+    @unittest.skip
+    def test_switch_off_all_tables(self):
+        pass
+
+    def setUp(self):
+        self.set_mode()
+        self.logfolder = make_temp_dir(os.path.join('experiments',
+                                                      'tests',
+                                                      'Log'))
+
+        random.seed()
+        self.trajname = make_trajectory_name(self)
+        self.mongo_db = 'arctic_' + self.trajname.lower()[:32]
+
+        env = Environment(trajectory=self.trajname,
+                          mongo_db=self.mongo_db,
+                          mongo_host = self.mongo_host,
+                          mongo_port = self.mongo_port,
+                          storage_service=None,
+                          log_stdout=self.log_stdout,
+                          log_config=get_log_config(),
+                          wildcard_functions=self.wildcard_functions,
+                          multiproc=self.multiproc,
+                          ncores=self.ncores,
+                          wrap_mode=self.mode,
+                          use_pool=self.use_pool,
+                          gc_interval=self.gc_interval,
+                          freeze_input=self.freeze_input,
+                          niceness=self.niceness,
+                          use_scoop=self.use_scoop,
+                          port=self.port,
+                          add_time=self.add_time,
+                          timeout=self.timeout,
+                          graceful_exit=self.graceful_exit)
+
+        traj = env.v_trajectory
+
+        traj.v_standard_parameter=Parameter
+
+        ## Create some parameters
+        self.param_dict={}
+        create_param_dict(self.param_dict)
+        ### Add some parameter:
+        add_params(traj,self.param_dict)
+
+        #remember the trajectory and the environment
+        self.traj = traj
+        self.env = env
+
+    def test_a_large_run(self):
+        get_root_logger().info('Testing large run')
+        self.traj.f_add_parameter('TEST', 'test_run')
+        ###Explore
+        self.explore_large(self.traj)
+        self.make_run_large_data()
+
+        self.assertTrue(self.traj.f_is_completed())
+
+        # Check if printing and repr work
+        get_root_logger().info(str(self.env))
+        get_root_logger().info(repr(self.env))
+
+        #newtraj = Trajectory()
+        newtraj = self.load_trajectory(trajectory_name=self.traj.v_name)
+        #newtraj.f_load(name=self.traj.v_name, as_new=False, load_data=2, filename=self.filename)
+
+        self.traj.f_load_skeleton()
+        self.traj.f_load_items(self.traj.f_to_dict().keys(), only_empties=True)
+
+        self.compare_trajectories(self.traj,newtraj)
+
+    def test_run(self):
+        self.traj.f_add_parameter('TEST', 'test_run')
+        ###Explore
+        self.explore(self.traj)
+
+        self.make_run()
+
+        self.assertTrue(self.traj.f_is_completed())
+
+        newtraj = self.load_trajectory(trajectory_name=self.traj.v_name,as_new=False)
+        self.traj.f_load_skeleton()
+        self.traj.f_load_items(self.traj.f_to_dict().keys(), only_empties=True)
+
+        self.compare_trajectories(self.traj, newtraj)
+
+    @unittest.skip
+    def test_file_overwriting(self):
+        pass
+
+    def test_just_one_run(self):
+        self.make_run()
+        self.assertTrue(self.traj.f_is_completed())
+
+        newtraj = self.load_trajectory(trajectory_name=self.traj.v_name,as_new=False)
+        self.traj.f_load_skeleton()
+        self.traj.f_load_items(self.traj.f_to_dict().keys(), only_empties=True)
+
+        self.compare_trajectories(self.traj, newtraj)
+
+        self.assertTrue(len(newtraj) == 1)
+
+class ResultSortMongoTest(ResultSortTest):
 
     tags = 'integration', 'mongo', 'environment'
 
@@ -1317,7 +1475,7 @@ class ResultSortTestMongo(ResultSortTest):
         super(ResultSortTest, self).tearDown()
 
     def test_if_results_are_sorted_correctly(self):
-        super(ResultSortTestMongo, self).test_if_results_are_sorted_correctly()
+        super(ResultSortMongoTest, self).test_if_results_are_sorted_correctly()
 
     def load_trajectory(self,trajectory_index=None,trajectory_name=None,as_new=False, how=2):
         ### Load The Trajectory and check if the values are still the same
