@@ -13,6 +13,9 @@ addons:
        - libhdf5-serial-dev
 
 
+services: mongodb
+
+
 matrix:
   include:
     - python: 2.6
@@ -80,6 +83,10 @@ install:
   - if [[ $EXAMPLES == ON ]]; then travis_retry conda install matplotlib; travis_retry pip install deap; fi
   - echo "++++++++++++ Installing SCOOP  +++++++++++++++++++++++++"
   - travis_retry pip install https://pypi.python.org/packages/source/s/scoop/scoop-0.7.1.release.tar.gz
+  - echo "++++++++++++ Installing pymongo  +++++++++++++++++++++++++"
+  - travis_retry conda install pymongo
+  - echo "++++++++++++ Installing arctic +++++++++++++++++++++++++++++"
+  - travis_retry pip install arctic
   - echo "+++++++++++ Installing PYPET unless coverage +++++++++++"
   - if [[ $COVERAGE == OFF ]]; then travis_retry python setup.py install; fi
   - echo "+++++++++++ FINISHED INSTALL +++++++++++"
@@ -93,6 +100,6 @@ branches:
   only:
     - develop
     - master
-    - removing_lazy_adding
     - brian2
+    - pymongo
 

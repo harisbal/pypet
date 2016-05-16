@@ -11,6 +11,7 @@ from pypet.tests.integration.environment_test import EnvironmentTest, ResultSort
 from pypet.tests.testutils.ioutils import run_suite,make_temp_dir, make_trajectory_name, \
      parse_args, get_log_config, unittest, get_random_port_url
 from pypet.tests.testutils.data import create_param_dict, add_params
+from pypet.utils.helpful_functions import get_ip_address
 import pypet.compat as compat
 import platform
 
@@ -195,6 +196,7 @@ class MultiprocSortNoPoolMongoTest(ResultSortMongoTest):
 
     def set_mode(self):
         super(MultiprocSortNoPoolMongoTest, self).set_mode()
+        #self.mongo_host = get_ip_address()
         self.multiproc = True
         self.ncores = 3
         self.use_pool=False

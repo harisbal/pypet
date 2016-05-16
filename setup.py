@@ -43,6 +43,7 @@ setup(
     packages=['pypet',
               'pypet.brian',
               'pypet.brian2',
+              'pypet.backends',
               'pypet.utils',
               'pypet.tests',
               'pypet.tests.unittests',

@@ -57,6 +57,8 @@ if __name__ == '__main__':
                     'MultiprocFrozenSCOOPSortNetqueueTest',
                     'Brain2NetworkTest',
                     'BrainNetworkTest',
+                    'MultiprocSortNoPoolMongoTest',
+                    'MultiprocFrozenPoolMongoTest',
                     'CapTest'))
     pred = lambda class_name, test_name, tags: (class_name in tests_include or
                                                  'multiproc' not in tags)

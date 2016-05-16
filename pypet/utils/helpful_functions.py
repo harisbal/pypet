@@ -311,16 +311,21 @@ def format_time(timestamp):
     return formatted_time
 
 
-def port_to_tcp(port=None):
-    """Returns local tcp address for a given `port`, automatic port if `None`"""
-    #address = 'tcp://' + socket.gethostbyname(socket.getfqdn())
+def get_ip_address():
+    """Returns local ip address of current host"""
     domain_name = socket.getfqdn()
     try:
         addr_list = socket.getaddrinfo(domain_name, None)
     except Exception:
         addr_list = socket.getaddrinfo('localhost', None)
     family, socktype, proto, canonname, sockaddr = addr_list[0]
-    address =  'tcp://' + sockaddr[0]
+    return sockaddr[0]
+
+
+def port_to_tcp(port=None):
+    """Returns local tcp address for a given `port`, automatic port if `None`"""
+    #address = 'tcp://' + socket.gethostbyname(socket.getfqdn())
+    address = 'tcp://' + get_ip_address()
     if port is None:
         port = ()
     if not isinstance(port, int):
