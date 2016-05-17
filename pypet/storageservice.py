@@ -2484,8 +2484,6 @@ class HDF5StorageService(StorageService, HasLogger):
                                                            name=self._trajectory_name,
                                                            title=self._trajectory_name,
                                                            filters=self._all_get_filters())
-        traj._stored = True
-
         # Store meta information
         self._trj_store_meta_data(traj)
 

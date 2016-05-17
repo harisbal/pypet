@@ -54,7 +54,6 @@ before_install:
   # Replace dep1 dep2 ... with your dependencies
   - conda create -q -n test-environment python=$TRAVIS_PYTHON_VERSION pip numpy scipy
   - source activate test-environment
-  - pip freeze
 
 
 install:
@@ -90,6 +89,7 @@ install:
   - echo "+++++++++++ Installing PYPET unless coverage +++++++++++"
   - if [[ $COVERAGE == OFF ]]; then travis_retry python setup.py install; fi
   - echo "+++++++++++ FINISHED INSTALL +++++++++++"
+  - pip freeze
 
 
 # Script command for all tests

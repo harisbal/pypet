@@ -908,7 +908,7 @@ class MongoStorageService(StorageService, HasLogger):
         if entry:
             add = {how: entry}
         else:
-            add = {'$set':{'_id': _id}}
+            add = {how: {'_': '_'}}
         u = pymongo.UpdateOne({'_id': _id}, add, upsert=upsert)
         self._bulk.append(u)
         if len(self._bulk) > self._max_bulk_length:
