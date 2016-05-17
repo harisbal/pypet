@@ -1070,7 +1070,7 @@ class MongoStorageService(StorageService, HasLogger):
             else:
                 option = '$setOnInsert'
 
-            data = {'_id': traj_group.v_full_name}
+            data = {}#'_id': traj_group.v_full_name}
 
             if type(traj_group) not in (nn.NNGroupNode, nn.ConfigGroup, nn.ParameterGroup,
                                              nn.DerivedParameterGroup, nn.ResultGroup):

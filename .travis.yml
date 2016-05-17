@@ -84,9 +84,9 @@ install:
   - echo "++++++++++++ Installing SCOOP  +++++++++++++++++++++++++"
   - travis_retry pip install https://pypi.python.org/packages/source/s/scoop/scoop-0.7.1.release.tar.gz
   - echo "++++++++++++ Installing pymongo  +++++++++++++++++++++++++"
-  - travis_retry conda install pymongo
+  - if (! [[ $TRAVIS_PYTHON_VERSION == 2.6* ]]); then travis_retry conda install pymongo; fi
   - echo "++++++++++++ Installing arctic +++++++++++++++++++++++++++++"
-  - travis_retry pip install arctic
+  - if (! [[ $TRAVIS_PYTHON_VERSION == 2.6* ]]); then travis_retry pip install arctic; fi
   - echo "+++++++++++ Installing PYPET unless coverage +++++++++++"
   - if [[ $COVERAGE == OFF ]]; then travis_retry python setup.py install; fi
   - echo "+++++++++++ FINISHED INSTALL +++++++++++"
