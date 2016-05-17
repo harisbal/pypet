@@ -189,7 +189,7 @@ class MultiprocPoolSortPipeTest(ResultSortTest):
 #         self.ncores = 3
 #         self.use_pool=False
 
-@unittest.skipIf(pymongo is None, 'Can only be run with pymongo')
+@unittest.skipIf(arctic is None, 'Can only be run with arctic')
 class MultiprocSortNoPoolMongoTest(ResultSortMongoTest):
 
     tags = 'integration', 'mongo', 'environment', 'multiproc', 'nopool',
@@ -377,7 +377,7 @@ class MultiprocFrozenPoolPipeTest(EnvironmentTest):
         self.niceness = check_nice(10)
 
 
-@unittest.skipIf(pymongo is None, 'Can only be run with pymongo')
+@unittest.skipIf(arctic is None, 'Can only be run with arctic')
 class MultiprocFrozenPoolMongoTest(EnvironmentMongoTest):
 
     tags = 'integration', 'hdf5', 'environment', 'multiproc', 'mongo', 'pool', 'freeze_input'

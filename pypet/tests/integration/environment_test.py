@@ -1212,6 +1212,7 @@ class ResultSortTest(TrajectoryComparator):
         traj.v_shortcuts=True
 
 
+@unittest.skipIf(arctic is None, 'Needs arctic')
 class EnvironmentMongoTest(EnvironmentTest):
     tags = 'integration', 'mongo', 'environment'
 
@@ -1244,31 +1245,31 @@ class EnvironmentMongoTest(EnvironmentTest):
                        load_other_data=2)
         return newtraj
 
-    @unittest.skip
+    @unittest.skip('NA')
     def test_errors(self):
         pass
 
-    @unittest.skip
+    @unittest.skip('NA')
     def test_two_runs(self):
         pass
 
-    @unittest.skip
+    @unittest.skip('NA')
     def test_switch_ON_large_tables(self):
         pass
 
-    @unittest.skip
+    @unittest.skip('NA')
     def test_NOT_purge_duplicate_comments(self):
         pass
 
-    @unittest.skip
+    @unittest.skip('NA')
     def test_switch_on_all_comments(self):
         pass
 
-    @unittest.skip
+    @unittest.skip('NA')
     def test_purge_duplicate_comments(self):
         pass
 
-    @unittest.skip
+    @unittest.skip('NA')
     def test_switch_off_all_tables(self):
         pass
 
@@ -1354,7 +1355,7 @@ class EnvironmentMongoTest(EnvironmentTest):
 
         self.compare_trajectories(self.traj, newtraj)
 
-    @unittest.skip
+    @unittest.skip('NA')
     def test_file_overwriting(self):
         pass
 
@@ -1378,6 +1379,8 @@ class EnvironmentMongoTest(EnvironmentTest):
         client.drop_database(self.mongo_db)
         super(EnvironmentTest, self).tearDown()
 
+
+@unittest.skipIf(arctic is None, 'Needs arctic')
 class ResultSortMongoTest(ResultSortTest):
 
     tags = 'integration', 'mongo', 'environment'
