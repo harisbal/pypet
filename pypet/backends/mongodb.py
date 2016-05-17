@@ -704,8 +704,9 @@ class MongoStorageService(StorageService, HasLogger):
         indices = []
         for idx in updated_run_information:
             info_dict = traj.f_get_run_information(idx, copy=False)
-            insert_dict = dict(_id = info_dict['idx'])
-            insert_dict.update(info_dict)
+            # insert_dict = dict(_id = info_dict['idx'])
+            # insert_dict.update(info_dict)
+            insert_dict = info_dict.copy()
             rows.append(pymongo.UpdateOne({'_id': info_dict['idx']},
                                     {'$set': insert_dict}))
             indices.append(idx)
@@ -918,7 +919,7 @@ class MongoStorageService(StorageService, HasLogger):
 
         # Description of the `info` table
 
-        descriptiondict = {'_id' : self.INFO,
+        descriptiondict = {#'_id' : self.INFO,
                            'name': traj.v_name,
                            'time': traj.v_time,
                            'timestamp': traj.v_timestamp,
@@ -957,7 +958,7 @@ class MongoStorageService(StorageService, HasLogger):
                     self._info_coll.delete_one({'_id': self.EXPLORATIONS})
             explored_list = compat.listkeys(traj._explored_parameters)
             self._info_coll.update_one( {'_id': self.EXPLORATIONS},  {'$set':
-                                                        {'_id': self.EXPLORATIONS,
+                                                        {#'_id': self.EXPLORATIONS,
                                                        self.EXPLORATIONS: explored_list}},
                                                         upsert=True)
 
@@ -1178,7 +1179,8 @@ class MongoStorageService(StorageService, HasLogger):
             full_name = link
         else:
             full_name = node_in_traj.v_full_name + '.' + link
-        self._srvc_update_db(entry={'_id': full_name, self.LINK: linking_name},
+        self._srvc_update_db(entry={#'_id': full_name,
+                                    self.LINK: linking_name},
                              _id = full_name)
         self._srvc_update_db(entry={self.LINKS: link},
                                          _id= node_in_traj.v_full_name,
@@ -1275,7 +1277,7 @@ class MongoStorageService(StorageService, HasLogger):
             else:
                 option = '$setOnInsert'
 
-            data = {'_id': instance.v_full_name,
+            data = {#'_id': instance.v_full_name,
                     self.CLASS_NAME: instance.f_get_class_name(),
                     self.LEAF: True}
 
@@ -1639,7 +1641,7 @@ class MongoStorageService(StorageService, HasLogger):
                                        % (link, new_traj_node.v_full_name))
                     self._srvc_flush_tree_db()
                     self._tree_coll.update_one({'_id': new_traj_node.v_full_name},
-                                           {'$pull': {self.LINKS: child_info}})
+                                           {'$pull': {self.LINKS: link}})
                     self._tree_coll.delete_one(entry)
                     return
 
