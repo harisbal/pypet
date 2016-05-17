@@ -890,7 +890,10 @@ class MongoStorageService(StorageService, HasLogger):
 
     @retry(9, Exception, 0.01, 'pypet.retry')
     def _retry_write(self):
-        self._tree_coll.bulk_write(self._bulk)
+        try:
+            self._tree_coll.bulk_write(self._bulk)
+        except Exception as exc:
+            raise
 
     def _srvc_flush_tree_db(self):
         if self._bulk:
@@ -902,7 +905,11 @@ class MongoStorageService(StorageService, HasLogger):
             self._bulk = []
 
     def _srvc_update_db(self, entry, _id, how='$setOnInsert', upsert=True):
-        u = pymongo.UpdateOne({'_id': _id}, {how: entry}, upsert=upsert)
+        if entry:
+            add = {how: entry}
+        else:
+            add = {'$set':{'_id': _id}}
+        u = pymongo.UpdateOne({'_id': _id}, add, upsert=upsert)
         self._bulk.append(u)
         if len(self._bulk) > self._max_bulk_length:
             self._srvc_flush_tree_db()
@@ -943,7 +950,7 @@ class MongoStorageService(StorageService, HasLogger):
         if explorations_entry is not None:
             explorations_list = explorations_entry[self.EXPLORATIONS]
             for param_name in explorations_list:
-                param_name = compat.tostr(param_name)
+                param_name = str(param_name)
                 if param_name not in traj._explored_parameters:
                     traj._explored_parameters[param_name] = None
 
@@ -2071,13 +2078,13 @@ class MongoStorageService(StorageService, HasLogger):
         info_entry = self._info_coll.find_one({'_id': self.INFO})
 
         try:
-            version = compat.tostr(info_entry['version'])
+            version = str(info_entry['version'])
         except (IndexError, ValueError) as ke:
             self._logger.error('Could not check version due to: %s' % str(ke))
             version = '`COULD NOT BE LOADED`'
 
         try:
-            python = compat.tostr(info_entry['python'])
+            python = str(info_entry['python'])
         except (IndexError, ValueError) as ke:
             self._logger.error('Could not check version due to: %s' % str(ke))
             python = '`COULD NOT BE LOADED`'
@@ -2094,12 +2101,12 @@ class MongoStorageService(StorageService, HasLogger):
             for irun in range(length):
                 traj._add_run_info(irun)
         else:
-            traj._comment = compat.tostr(info_entry['comment'])
+            traj._comment = str(info_entry['comment'])
             traj._timestamp = float(info_entry['timestamp'])
             traj._trajectory_timestamp = traj._timestamp
-            traj._time = compat.tostr(info_entry['time'])
+            traj._time = str(info_entry['time'])
             traj._trajectory_time = traj._time
-            traj._name = compat.tostr(info_entry['name'])
+            traj._name = str(info_entry['name'])
             traj._traj_name = traj._name
             traj._version = version
             traj._python = python
@@ -2108,15 +2115,15 @@ class MongoStorageService(StorageService, HasLogger):
 
             if with_run_information:
                 for entry in self._run_coll.find():
-                    name = compat.tostr(entry['name'])
+                    name = str(entry['name'])
                     idx = int(entry['idx'])
                     timestamp = float(entry['timestamp'])
-                    time_ = compat.tostr(entry['time'])
+                    time_ = str(entry['time'])
                     completed = int(entry['completed'])
-                    summary = compat.tostr(entry['parameter_summary'])
-                    hexsha = compat.tostr(entry['short_environment_hexsha'])
+                    summary = str(entry['parameter_summary'])
+                    hexsha = str(entry['short_environment_hexsha'])
 
-                    runtime = compat.tostr(entry['runtime'])
+                    runtime = str(entry['runtime'])
                     finish_timestamp = float(entry['finish_timestamp'])
 
                     info_dict = {'idx': idx,

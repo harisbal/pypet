@@ -3588,7 +3588,7 @@ class HDF5StorageService(StorageService, HasLogger):
 
             overwrite = store_data == pypetconstants.OVERWRITE_DATA
 
-            if ((_newly_created or overwrite) and
+            if ((_newly_created or overwrite or not traj_group._stored) and
                 type(traj_group) not in (nn.NNGroupNode, nn.ConfigGroup, nn.ParameterGroup,
                                              nn.DerivedParameterGroup, nn.ResultGroup)):
                 # We only store the name of the class if it is not one of the standard groups,
@@ -3596,7 +3596,7 @@ class HDF5StorageService(StorageService, HasLogger):
                 setattr(_hdf5_group._v_attrs, HDF5StorageService.CLASS_NAME,
                         traj_group.f_get_class_name())
 
-            if (_newly_created or overwrite):
+            if (_newly_created or overwrite or not traj_group._stored):
                 if (traj_group.v_comment != ''):
                     setattr(_hdf5_group._v_attrs, HDF5StorageService.COMMENT, traj_group.v_comment)
                 self._ann_store_annotations(traj_group, _hdf5_group, overwrite=overwrite)
