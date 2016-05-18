@@ -1273,6 +1273,9 @@ class EnvironmentMongoTest(EnvironmentTest):
     def test_switch_off_all_tables(self):
         pass
 
+    def test_expand(self):
+        return super(EnvironmentMongoTest, self).test_expand()
+
     def setUp(self):
         self.set_mode()
         self.logfolder = make_temp_dir(os.path.join('experiments',

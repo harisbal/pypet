@@ -1,4 +1,5 @@
 import pymongo
+from pymongo.errors import BulkWriteError
 from bson import Binary
 import os
 import arctic
@@ -893,6 +894,9 @@ class MongoStorageService(StorageService, HasLogger):
         try:
             self._tree_coll.bulk_write(self._bulk)
         except Exception as exc:
+            if isinstance(exc, BulkWriteError):
+                for error in exc.details['writeErrors']:
+                    self._logger.error(error)
             raise
 
     def _srvc_flush_tree_db(self):
@@ -908,7 +912,7 @@ class MongoStorageService(StorageService, HasLogger):
         if entry:
             add = {how: entry}
         else:
-            add = {how: {'_': '_'}}
+            add = {how: {'_': '_'}}  # You cannot add empty docs
         u = pymongo.UpdateOne({'_id': _id}, add, upsert=upsert)
         self._bulk.append(u)
         if len(self._bulk) > self._max_bulk_length:
@@ -1339,8 +1343,21 @@ class MongoStorageService(StorageService, HasLogger):
                 metadata = None
             try:
                 self._arctic_lib.write(name, data_to_store, metadata=metadata)
-            except:
-                raise
+            except TypeError:
+                # FIX for error cannot write binary in Python 3.5
+                # See also https://github.com/manahl/arctic/issues/142
+                if metadata is None:
+                    metadata = {}
+                if self.BINARY in metadata:
+                    raise
+                else:
+                    metadata[self.BINARY] = True
+                self._logger.error('Could not write into library, try again as binary')
+                data_to_store = Binary(pickle.dumps(data_to_store, protocol=self._protocol))
+                try:
+                    self._arctic_lib.write(name, data_to_store, metadata=metadata)
+                except Exception as exc:
+                    pass
 
     def _all_delete_parameter_or_result_or_group(self, instance,
                                                  delete_only=None,
