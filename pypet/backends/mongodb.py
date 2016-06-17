@@ -904,7 +904,7 @@ class MongoStorageService(StorageService, HasLogger):
             try:
                 self._retry_write()
             except:
-                self._logger.error('Bulk write error with bul `%s`' % str(self._bulk))
+                self._logger.error('Bulk write error with bulk `%s`' % str(self._bulk))
                 raise
             self._bulk = []
 
