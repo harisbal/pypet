@@ -5,10 +5,18 @@ pypet 0.4.0
 *   Annotations are no longer updated, they are stored once and never changed afterwards,
     unless explicetly overwritten by the user.
 
+*   BUG FIX: Correct progressbar printing in Python3 using reprint
+
 
 pypet 0.3.0
 
 *   Support for BRIAN2
+
+*   New Brian2Parameter
+
+*   New Brian2Result and Brian2MontitorResult
+
+*   New BRIAN2 Network framework
 
 *   BUG FIX: Auto loading parameters will set the parameter to the current run.
 

@@ -193,11 +193,11 @@ class _Progressbar(object):
             if fmt_string:
                 statement = fmt_string % statement
             if logger == 'print':
-                if reprint and not ending:
+                if reprint:
                     if compat.python_major == 3:
-                        print(statement, end='\r', flush=True)
+                        print('\r' + statement, end='', flush=True)
                     else:
-                        print(statement, end='\r')
+                        print('\r' + statement, end='')
                 else:
                     print(statement)
             elif logger is not None:
@@ -265,20 +265,45 @@ def progressbar(index, total, percentage_step=10, logger='print', log_level=logg
                         time=time, length=length, fmt_string=fmt_string, reset=reset)
 
 
-def get_matching_kwargs(func, kwargs):
-    """Takes a function and keyword arguments and returns the ones that can be passed."""
+def _get_argspec(func):
+    """Helper function to support both Python versions"""
     if inspect.isclass(func):
         func = func.__init__
-    try:
-        argspec = inspect.getargspec(func)
-        if argspec.keywords is not None:
-            return kwargs.copy()
-        else:
-            matching_kwargs = dict((k, kwargs[k]) for k in argspec.args if k in kwargs)
-            return matching_kwargs
-    except TypeError:
-        # Class has no init function
-        return {}
+    if compat.python_major == 2 or compat.python_minor < 4:
+        try:
+            argspec = inspect.getargspec(func)
+            uses_starstar = bool(argspec.keywords)
+            args = argspec.args
+        except TypeError:
+            # Class has no init function
+            uses_starstar = False
+            args = []
+    elif compat.python_major == 3:
+        if not inspect.isfunction(func):
+            # Init function not existing
+            return [], False
+        parameters = inspect.signature(func).parameters
+        args = []
+        uses_starstar = False
+        for par in parameters.values():
+            if (par.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD or
+                        par.kind == inspect.Parameter.KEYWORD_ONLY):
+                args.append(par.name)
+            elif par.kind == inspect.Parameter.VAR_KEYWORD:
+                uses_starstar = True
+    else:
+        raise RuntimeError('You shall not pass!')
+    return args, uses_starstar
+
+
+def get_matching_kwargs(func, kwargs):
+    """Takes a function and keyword arguments and returns the ones that can be passed."""
+    args, uses_startstar = _get_argspec(func)
+    if uses_startstar:
+        return kwargs.copy()
+    else:
+        matching_kwargs = dict((k, kwargs[k]) for k in args if k in kwargs)
+        return matching_kwargs
 
 
 def result_sort(result_list, start_index=0):
@@ -325,17 +350,52 @@ def get_ip_address():
     return sockaddr[0]
 
 
+def convert_ipv6(host):
+    if ':' in host:
+        #IP 6 address
+        host = host.split('%')[0]
+        host = '[%s]' % host
+
+    return  host
+
+
+def is_ipv6(url):
+    return '[' in url
+
+
+def convert_ipv6(host):
+    if ':' in host:
+        #IP 6 address
+        host = host.split('%')[0]
+        host = '[%s]' % host
+
+    return  host
+
+
+def is_ipv6(url):
+    return '[' in url
+
+
 def port_to_tcp(port=None):
     """Returns local tcp address for a given `port`, automatic port if `None`"""
     #address = 'tcp://' + socket.gethostbyname(socket.getfqdn())
-    address = 'tcp://' + get_ip_address()
+    address = get_ip_address()
+    host = convert_ipv6(address)
+    address =  'tcp://' + host
     if port is None:
         port = ()
     if not isinstance(port, int):
         # determine port automatically
         context = zmq.Context()
-        socket_ = context.socket(zmq.REP)
-        port = socket_.bind_to_random_port(address, *port)
+        try:
+            socket_ = context.socket(zmq.REP)
+            socket_.ipv6 = is_ipv6(address)
+            port = socket_.bind_to_random_port(address, *port)
+        except Exception:
+            print('Could not connect to {} using {}'.format(address, addr_list))
+            pypet_root_logger = logging.getLogger('pypet')
+            pypet_root_logger.exception('Could not connect to {}'.format(address))
+            raise
         socket_.close()
         context.term()
     return address + ':' + str(port)
