@@ -1935,7 +1935,7 @@ class MongoStorageService(StorageService, HasLogger):
 
     def _trj_load_trajectory(self, traj, as_new, load_parameters, load_derived_parameters,
                              load_results, load_other_data, recursive, max_depth,
-                             with_run_information, force):
+                             with_run_information,  with_meta_data, force):
         """Loads a single trajectory from a given file.
 
 
@@ -2017,7 +2017,8 @@ class MongoStorageService(StorageService, HasLogger):
         # Loads meta data like the name, timestamps etc.
         # load_data is only used here to determine how to load the annotations
         load_data = max(load_parameters, load_derived_parameters, load_results, load_other_data)
-        self._trj_load_meta_data(traj, load_data, as_new, with_run_information, force)
+        if with_meta_data:
+            self._trj_load_meta_data(traj, load_data, as_new, with_run_information, force)
 
         if (load_parameters != pypetconstants.LOAD_NOTHING or
                 load_derived_parameters != pypetconstants.LOAD_NOTHING or
