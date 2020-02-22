@@ -4183,7 +4183,7 @@ class HDF5StorageService(StorageService, HasLogger):
         try:
             if 'filters' not in kwargs:
                 filters = self._all_get_filters(kwargs)
-                kwargs['filters'] = filters
+                #kwargs['filters'] = filters
             if 'format' not in kwargs:
                 kwargs['format'] = self.pandas_format
             if 'encoding' not in kwargs:
@@ -4198,8 +4198,8 @@ class HDF5StorageService(StorageService, HasLogger):
             else:
                 self._logger.debug('Appending to pandas data `%s` in `%s`' % (key, fullname))
 
-            if data is not None and (kwargs['format'] == 'f' or kwargs['format'] == 'fixed'):
-                kwargs['expectedrows'] = data.shape[0]
+            #if data is not None and (kwargs['format'] == 'f' or kwargs['format'] == 'fixed'):
+            #    kwargs['expectedrows'] = data.shape[0]
 
             name = group._v_pathname + '/' + key
             self._hdf5store.put(name, data, **kwargs)
